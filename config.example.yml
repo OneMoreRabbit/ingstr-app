@@ -1,0 +1,66 @@
+# ──────────────────────────────────────────────────────────────────────
+# Ingstr configuration — example
+#
+# Copy to /etc/ingstr/config.yml (or pass --config) and edit. All paths
+# below must exist and be readable at runtime; Ingstr fails fast if not.
+# ──────────────────────────────────────────────────────────────────────
+
+org: arc                                  # logging label only; one org per process
+
+# ── What to ingest ───────────────────────────────────────────────────
+source:
+  root: /mnt/raid_arc/drive
+  follow_symlinks: false
+  exclude_patterns:                       # gitignore-style globs, applied to relative paths
+    - "**/.tmp/**"
+    - "**/~$*"
+    - "**/Thumbs.db"
+
+# ── Where to find classification metadata ────────────────────────────
+# Both files come from upstream (rbac-compile + export_group_gids.yml).
+# Ingstr only reads them — never generates or mutates.
+plan:
+  compiled_plan_path: /mnt/registry/compiled_plan.yml
+  group_gid_map_path: /mnt/registry/group_gid_map.yml
+  reload_on_run: true                     # always re-read at start of each run
+
+# ── Where to embed ───────────────────────────────────────────────────
+embedding:
+  endpoint: http://ollama:11434
+  model: nomic-embed-text
+  vector_dim: 768                         # MUST match the Qdrant collection's vector size
+  timeout_seconds: 30
+  batch_size: 16                          # chunks per HTTP call
+
+# ── Where to store ───────────────────────────────────────────────────
+qdrant:
+  url: http://qdrant_arc:6333
+  api_key_env: QDRANT_RW_API_KEY          # name of env var holding the key
+  collection: documents
+  upsert_batch_size: 64
+  timeout_seconds: 30
+
+# ── How to chunk ─────────────────────────────────────────────────────
+chunking:
+  strategy: unstructured                  # only "unstructured" in MVP
+  chunk_size_chars: 2000                  # ~500 tokens
+  chunk_overlap_chars: 200
+
+# ── Per-file-type parser routing (MVP: unstructured handles all) ─────
+parsers:
+  pdf:   unstructured
+  docx:  unstructured
+  xlsx:  unstructured
+  txt:   unstructured
+  md:    unstructured
+  html:  unstructured
+
+# ── State tracking ───────────────────────────────────────────────────
+state:
+  db_path: /var/lib/ingstr/state.db
+
+# ── Logging ──────────────────────────────────────────────────────────
+logging:
+  level: INFO                             # DEBUG | INFO | WARNING | ERROR
+  format: json                            # json | text
+  log_full_query: false                   # never log file contents at INFO

@@ -1,0 +1,18 @@
+[Unit]
+Description=Ingstr — trigger ingest when /mnt/raid_arc/.last_sync changes
+Documentation=https://github.com/jobcpf/ingstr
+
+[Path]
+# Fires whenever the upstream rsync (or whatever populates the source tree)
+# touches the sentinel file. Adjust path to match your source mount.
+PathChanged=/mnt/raid_arc/.last_sync
+
+# Triggers the .service of the same name unless overridden:
+Unit=ingstr-ingest.service
+
+# Wait briefly so a burst of file changes only triggers one run.
+# (Systemd path units don't have native debouncing; the .service Type=oneshot
+# with no Restart= already collapses overlapping triggers.)
+
+[Install]
+WantedBy=multi-user.target

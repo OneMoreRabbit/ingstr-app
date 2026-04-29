@@ -1,0 +1,21 @@
+[Unit]
+Description=Ingstr — incremental document ingestion run
+Documentation=https://github.com/jobcpf/ingstr
+Requires=docker.service
+After=docker.service network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/etc/ingstr
+EnvironmentFile=/etc/ingstr/secrets.env
+ExecStart=/usr/bin/docker compose -f /etc/ingstr/compose.yml run --rm ingstr ingest
+StandardOutput=journal
+StandardError=journal
+
+# Don't pile up overlapping runs. If a previous invocation is still
+# running when the .path unit fires again, the new request is dropped.
+# Use `Restart=on-failure` only if partial-failure exit code 3 should retry.
+
+[Install]
+WantedBy=multi-user.target
