@@ -131,6 +131,39 @@ class QdrantWriter:
                 f"qdrant delete failed (source_path={source_path}): {e}"
             ) from e
 
+    def set_classification_group(
+        self,
+        source_path: str,
+        new_group: str,
+        *,
+        indexed_at: str,
+    ) -> None:
+        """Refresh the `classification_group` (and `indexed_at`) on every point
+        whose `source_path` matches. Used in full mode when the file's filesystem
+        GID has changed but its content hash hasn't — avoids re-embedding.
+        """
+        try:
+            self._client.set_payload(
+                collection_name=self.cfg.collection,
+                payload={
+                    "classification_group": new_group,
+                    "indexed_at": indexed_at,
+                },
+                points_selector=Filter(
+                    must=[
+                        FieldCondition(
+                            key="source_path",
+                            match=MatchValue(value=source_path),
+                        )
+                    ]
+                ),
+                wait=True,
+            )
+        except Exception as e:
+            raise UpstreamUnavailable(
+                f"qdrant set_payload failed (source_path={source_path}): {e}"
+            ) from e
+
     def health(self) -> bool:
         """True iff the qdrant endpoint responds. Never raises."""
         try:

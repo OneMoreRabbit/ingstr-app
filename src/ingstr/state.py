@@ -45,6 +45,20 @@ class FileRecord:
     last_error: str | None = None
 
 
+@dataclass(frozen=True)
+class RunRecord:
+    run_id: int
+    started_at: str
+    finished_at: str | None
+    mode: str
+    files_seen: int | None
+    files_indexed: int | None
+    files_skipped: int | None
+    files_errored: int | None
+    chunks_written: int | None
+    exit_code: int | None
+
+
 class StateDB:
     """SQLite-backed state for incremental ingestion and run tracking.
 
@@ -124,6 +138,35 @@ class StateDB:
             )
             assert cur.lastrowid is not None
             return cur.lastrowid
+
+    def count_errored_files(self) -> int:
+        with self._cursor() as cur:
+            row = cur.execute(
+                "SELECT COUNT(*) FROM files WHERE last_error IS NOT NULL"
+            ).fetchone()
+        return int(row[0])
+
+    def get_last_run(
+        self,
+        *,
+        mode: str | None = None,
+        success_only: bool = False,
+    ) -> RunRecord | None:
+        """Most-recent finished run, optionally filtered by mode and exit code."""
+        clauses = ["finished_at IS NOT NULL"]
+        params: list[object] = []
+        if mode is not None:
+            clauses.append("mode = ?")
+            params.append(mode)
+        if success_only:
+            clauses.append("exit_code = 0")
+        where = " AND ".join(clauses)
+        with self._cursor() as cur:
+            row = cur.execute(
+                f"SELECT * FROM runs WHERE {where} ORDER BY run_id DESC LIMIT 1",
+                params,
+            ).fetchone()
+        return RunRecord(**dict(row)) if row else None
 
     def finish_run(
         self,
