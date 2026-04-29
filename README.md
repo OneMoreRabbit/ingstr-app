@@ -91,7 +91,7 @@ Each of these is a deliberate boundary:
 
 ## Running in Docker on otter
 
-The intended deployment is a one-shot container on `otter`, alongside (but separate from) the Qdrant and Ollama stacks. Tagged releases publish an image to GHCR (`ghcr.io/jobcpf/ingstr`) via [.github/workflows/release.yml](.github/workflows/release.yml). On otter, pull the image and invoke ingest with `docker compose run`:
+The intended deployment is a one-shot container on `otter`, alongside (but separate from) the Qdrant and Ollama stacks. Tagged releases publish an image to GHCR (`ghcr.io/jobcpf/ingstr-app`) via [.github/workflows/release.yml](.github/workflows/release.yml). On otter, pull the image and invoke ingest with `docker compose run`:
 
 ```bash
 docker compose -f /etc/ingstr/compose.yml run --rm ingstr health
@@ -117,7 +117,7 @@ See [deploy/README.md](deploy/README.md) for the full walkthrough — GitHub rep
 ## Development setup
 
 ```bash
-git clone https://github.com/jobcpf/ingstr.git
+git clone https://github.com/jobcpf/ingstr-app.git
 cd ingstr
 python -m venv .venv
 source .venv/bin/activate

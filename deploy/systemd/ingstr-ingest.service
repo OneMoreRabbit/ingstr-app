@@ -1,6 +1,6 @@
 [Unit]
 Description=Ingstr — incremental document ingestion run
-Documentation=https://github.com/jobcpf/ingstr
+Documentation=https://github.com/jobcpf/ingstr-app
 Requires=docker.service
 After=docker.service network-online.target
 Wants=network-online.target

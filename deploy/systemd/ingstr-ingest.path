@@ -1,6 +1,6 @@
 [Unit]
 Description=Ingstr — trigger ingest when /mnt/raid_arc/.last_sync changes
-Documentation=https://github.com/jobcpf/ingstr
+Documentation=https://github.com/jobcpf/ingstr-app
 
 [Path]
 # Fires whenever the upstream rsync (or whatever populates the source tree)

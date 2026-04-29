@@ -16,7 +16,7 @@
 
 services:
   ingstr:
-    image: ghcr.io/jobcpf/ingstr:latest
+    image: ghcr.io/jobcpf/ingstr-app:latest
     networks:
       - rag-net                                # peer with qdrant + ollama
     volumes:

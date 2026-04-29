@@ -15,15 +15,15 @@ Push the repo to GitHub:
 
 ```bash
 cd /path/to/ingstr-app
-git remote add origin git@github.com:jobcpf/ingstr.git
+git remote add origin git@github.com:jobcpf/ingstr-app.git
 git push -u origin main
 ```
 
-The release workflow (`.github/workflows/release.yml`) is triggered by tags matching `v*`. It uses the built-in `GITHUB_TOKEN` and pushes to `ghcr.io/jobcpf/ingstr`. No PAT required.
+The release workflow (`.github/workflows/release.yml`) is triggered by tags matching `v*`. It uses the built-in `GITHUB_TOKEN` and pushes to `ghcr.io/jobcpf/ingstr-app`. No PAT required.
 
 **Image visibility.** GHCR images are private by default. Make the package public if you want unauthenticated pulls on otter:
 
-1. After the first successful build, go to https://github.com/users/jobcpf/packages/container/ingstr/settings
+1. After the first successful build, go to https://github.com/users/jobcpf/packages/container/ingstr-app/settings
 2. *Danger zone* → *Change visibility* → *Public*
 
 If you keep it private, otter needs to authenticate before pulling — see step 4.
@@ -37,12 +37,12 @@ git tag v0.1.0
 git push --tags
 ```
 
-Watch the run at https://github.com/jobcpf/ingstr/actions. On success the image will exist as:
+Watch the run at https://github.com/jobcpf/ingstr-app/actions. On success the image will exist as:
 
-- `ghcr.io/jobcpf/ingstr:v0.1.0`
-- `ghcr.io/jobcpf/ingstr:0.1.0`
-- `ghcr.io/jobcpf/ingstr:0.1`
-- `ghcr.io/jobcpf/ingstr:latest` (only if the tag is on the default branch)
+- `ghcr.io/jobcpf/ingstr-app:v0.1.0`
+- `ghcr.io/jobcpf/ingstr-app:0.1.0`
+- `ghcr.io/jobcpf/ingstr-app:0.1`
+- `ghcr.io/jobcpf/ingstr-app:latest` (only if the tag is on the default branch)
 
 ---
 
@@ -71,7 +71,7 @@ If the GHCR package is public, skip this. Otherwise on otter:
 # https://github.com/settings/tokens, then:
 echo "$GHCR_PAT" | docker login ghcr.io -u jobcpf --password-stdin
 
-docker pull ghcr.io/jobcpf/ingstr:v0.1.0
+docker pull ghcr.io/jobcpf/ingstr-app:v0.1.0
 ```
 
 For unattended pulls, store the PAT under root's `~/.docker/config.json` or a credential helper. Do **not** put it in `secrets.env` — that file is for runtime env vars passed into the container, not docker daemon auth.
@@ -143,7 +143,7 @@ Consequences:
 
 ```bash
 # On otter:
-docker pull ghcr.io/jobcpf/ingstr:v0.2.0
+docker pull ghcr.io/jobcpf/ingstr-app:v0.2.0
 sudo sed -i 's|ingstr:v0.1.0|ingstr:v0.2.0|' /etc/ingstr/compose.yml
 docker compose --env-file /etc/ingstr/secrets.env run --rm ingstr health
 ```
