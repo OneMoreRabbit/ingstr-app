@@ -37,16 +37,14 @@ RUN python -m venv /opt/venv \
  && /opt/venv/bin/pip install --upgrade pip \
  && /opt/venv/bin/pip install .
 
-# Some unstructured extras pull in spacy transitively, others don't —
-# install it explicitly so the spaCy model download below is reproducible
-# regardless of which extras are pinned in pyproject.toml. (No-op if
-# already satisfied by a transitive dep.)
-RUN /opt/venv/bin/pip install spacy
-
 # Pre-download NLP models that `unstructured` lazy-loads at parse time.
 # Doing this at build time (as root) bakes the data into /opt/venv so the
 # runtime container — which drops privileges to a non-root `ingstr` user
 # via setpriv — does not try to write into the venv at parse time.
+#
+# spaCy and NLTK are direct deps in pyproject.toml (not transitive via
+# unstructured's per-format extras), so they're already installed by the
+# `pip install .` step above.
 #
 # spaCy: en_core_web_sm is installed as a pip-style package under the
 # venv and gets copied with the rest of /opt/venv to the runtime stage.

@@ -34,6 +34,14 @@ dependencies = [
     # the rule "format support is explicit, not implicit". Excluded:
     # [local-inference] (multi-GB ML stack — image-only PDFs / OCR not v0.1).
     "unstructured[pdf,docx,pptx,xlsx,md,html]>=0.14,<1.0",
+    # spaCy + NLTK: used by `unstructured` for sentence segmentation, POS
+    # tagging, and chunk_by_title. They are NOT pulled in by the per-format
+    # extras above; installing them explicitly keeps "what the image needs"
+    # in one place rather than hidden in the Dockerfile. Their models / data
+    # files are pre-downloaded in the Dockerfile builder stage so the
+    # privilege-dropped runtime never tries to write into /opt/venv.
+    "spacy>=3.7,<4",
+    "nltk>=3.8,<4",
     "httpx>=0.27,<1.0",
     "pyyaml>=6.0,<7.0",
     "typer>=0.12,<1.0",
