@@ -316,6 +316,87 @@ names is a breaking change for any future library users.
 handling. Probably not worth it unless image size or install time
 becomes a real pain.
 
+### C9. Additional file-format support (currently excluded)
+
+**What:** Operators currently exclude many file types via
+`source.exclude_patterns` because Ingstr's pipeline can't extract useful
+searchable content from them. Categories typically excluded in production
+configs:
+
+- **Images** — `.jpg`, `.jpeg`, `.png`, `.gif`, `.bmp`, `.tiff`, `.tif`,
+  `.webp`, `.heic`, `.heif`, `.svg`, `.ico`
+- **Video** — `.mp4`, `.mov`, `.avi`, `.mkv`, `.webm`, `.wmv`
+- **Audio** — `.mp3`, `.wav`, `.m4a`, `.flac`, `.ogg`, `.aac`
+- **Archives** — `.zip`, `.tar`, `.gz`, `.tgz`, `.bz2`, `.7z`, `.rar`
+- **Compiled / binary** — `.exe`, `.dll`, `.so`, `.dylib`, `.dmg`, `.iso`,
+  `.bin`
+- **Design / proprietary** — `.psd`, `.ai`, `.indd`, `.sketch`, `.fig`
+
+For a complete RAG knowledge base each category represents real
+organisational content (marketing material, training videos, recordings
+of meetings, design archives) that's currently invisible. Each category
+needs its own pipeline component, not a simple library swap.
+
+**Per-category notes:**
+
+- **Images** — two paths:
+  - OCR for text-bearing images (scanned forms, screenshots, image-only
+    PDFs). Same blocker as §C1: requires `unstructured[local-inference]`
+    (multi-GB ML stack) or a sidecar OCR service. Most-requested by
+    operators.
+  - Vision-LLM description for general images: embed a textual description
+    (e.g. *"[Image: a flowchart showing Q3 sales pipeline]"*) rather than
+    the image itself. Requires a separate model (CLIP, GPT-4V-class) and
+    a per-org cost analysis.
+
+- **Audio + video** — speech-to-text via Whisper or a managed STT service.
+  Considerations: chunking by silence boundaries vs fixed time windows;
+  speaker diarisation is a separate problem; significant compute, almost
+  certainly a sidecar service rather than baked into Ingstr. Time
+  alignment for citation makes this naturally per-speech-segment chunking
+  rather than `unstructured`-style title chunking.
+
+- **Archives** — recursive: extract → walk → ingest, treating extracted
+  files as if they were on the source tree directly. Considerations:
+  storage (extract to `/tmp` inside container, clean up after), nested
+  archives (limit recursion depth), format-specific deps (`libarchive`,
+  `py7zr`, `rarfile`), encrypted archives need a credential path Ingstr
+  currently doesn't have. **Smallest investment, biggest content
+  uncovered** of the four categories.
+
+- **Compiled / binary / design** — generally unrecoverable for text
+  indexing without specialised tooling. `.psd` and `.ai` have layer text
+  extractable via proprietary libs but the cost-benefit is poor.
+  Probably stay-excluded indefinitely.
+
+**Why now:** These represent significant content in real corpora. Ingestion
+of marketing material (currently mostly graphics-heavy PDFs + image files
+that get excluded), training videos, and meeting recordings is the
+difference between "Ingstr indexes our shared drive" and "Ingstr indexes
+the documents on our shared drive."
+
+**Cost (per category, rough):**
+
+| Category | Effort | Compute infra | Image impact |
+|---|---|---|---|
+| Archives | days–weeks | none | small (one apt lib) |
+| Image OCR (via local-inference) | weeks | none new (still local) | +2–4 GB image |
+| Image OCR (sidecar) | weeks | new service | none on Ingstr image |
+| Vision-LLM image description | weeks | new model endpoint | none on Ingstr image |
+| Audio/video transcription | weeks–months | Whisper service | none on Ingstr image |
+| Design files | not worth it | — | — |
+
+**Decision needed:** Which to prioritise. The simplest data point is
+"what fraction of excluded files in production fall into each category".
+Archive extraction is the dark-horse pick — small effort, no new
+infrastructure, surfaces whatever happens to be inside zip bundles
+(often documents that *should* have been ingested directly).
+
+**How to apply:** For any new format added, **also audit OS-level libs**
+(see §F lesson) — pip extras alone aren't sufficient if the format's
+backend can `dlopen` system libraries. Check with a graphics-heavy
+sample before assuming the apt-installed deps are complete.
+
 ---
 
 ## D. Code quality / dev ergonomics (small, mostly)
