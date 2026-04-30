@@ -49,10 +49,13 @@ services:
       # same path. Shared across all orgs on the host.
       - /mnt/registry:/mnt/registry:ro
 
-      # Operator-managed config (host-side, Ansible-deployed). For multi-
-      # org hosts use a per-org directory like /etc/ingstr/<org>/ and
-      # adjust this bind mount accordingly.
-      - /etc/ingstr:/etc/ingstr:ro
+      # Operator-managed config (host-side, Ansible-deployed). The `.`
+      # resolves to the directory containing this compose.yml — so for
+      # per-org production deploys at /etc/ingstr/<org>/compose.yml the
+      # container sees that org's config.yml at /etc/ingstr/config.yml,
+      # and for manual testing at /home/<user>/docker/ingstr/<org>/ the
+      # same mapping holds. config.yml MUST sit alongside compose.yml.
+      - .:/etc/ingstr:ro
 
       # SQLite state DB. Per-org named volume so it persists across
       # container churn. Compose prefixes volume names with the project
