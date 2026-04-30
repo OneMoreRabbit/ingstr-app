@@ -1,50 +1,70 @@
 # Ingstr deploy on otter — compose example.
 #
-# Qdrant and Ollama are NOT defined here; they are managed by separate
-# Ansible-deployed compose stacks. This file only declares the Ingstr service
-# and assumes both peers are reachable over a shared external Docker network.
+# One compose stack = one organisation. Per-org Qdrant + Ingstr + state
+# volume; shared Ollama and shared host-mounted registry. The org's data
+# share is NFS-mounted INSIDE the container (so otter's host filesystem
+# stays free of org data).
 #
-# Ingstr is a one-shot job. Do NOT `docker compose up` this stack — there is
-# no long-running service to keep alive. Invoke runs explicitly:
+# Variables expected from --env-file (typically secrets.env, populated
+# by Ansible at deploy time):
 #
-#   docker compose -f compose.yml run --rm ingstr health
-#   docker compose -f compose.yml run --rm ingstr ingest --dry-run
-#   docker compose -f compose.yml run --rm ingstr ingest
+#   QDRANT_RW_API_KEY      (required)  per-org Qdrant write key
+#   INGSTR_VERSION         (optional)  image tag, defaults to "latest"
+#   ORG_DATA_NFS_ADDR      (required)  NFS server address, e.g. "10.0.0.10"
+#   ORG_DATA_NFS_DEVICE    (required)  NFS export path, e.g. ":/exports/arc/drive"
+#   ORG_DATA_NFS_OPTIONS   (optional)  mount opts, defaults to "soft,ro,nolock"
 #
-# Or wire `docker compose run` into a systemd .service unit triggered by a
-# .path unit watching /mnt/raid_arc/.last_sync (see deploy/systemd/).
+# Ingstr is a one-shot job. Do NOT `docker compose up`. Invoke runs
+# explicitly:
+#
+#   docker compose --env-file secrets.env -f compose.yml run --rm ingstr health
+#   docker compose --env-file secrets.env -f compose.yml run --rm ingstr ingest --dry-run
+#   docker compose --env-file secrets.env -f compose.yml run --rm ingstr ingest
+#
+# Or wire a `docker compose run` invocation into a systemd .service
+# unit triggered by a .path unit (see deploy/systemd/).
 
 services:
   ingstr:
-    image: ghcr.io/jobcpf/ingstr-app:latest
-    networks:
-      - rag-net                                # peer with qdrant + ollama
+    image: ghcr.io/jobcpf/ingstr-app:${INGSTR_VERSION:-latest}
     volumes:
-      # Source data (NFS, read-only). File group ownership drives classification.
-      - /mnt/raid_arc:/mnt/raid_arc:ro
+      # Org data: NFS mounted by Docker INTO the container.
+      # otter's host filesystem doesn't see this share.
+      - org_data:/mnt/data:ro
 
-      # Registry: compiled_plan.yml + group_gid_map.yml (read-only).
+      # Registry: compiled_plan.yml + group_gid_map.yml. Host-mounted on
+      # otter at /mnt/registry and bind-mounted into the container at the
+      # same path. Shared across all orgs on the host.
       - /mnt/registry:/mnt/registry:ro
 
-      # Operator-managed config (host-side, Ansible-deployed).
+      # Operator-managed config (host-side, Ansible-deployed). For multi-
+      # org hosts use a per-org directory like /etc/ingstr/<org>/ and
+      # adjust this bind mount accordingly.
       - /etc/ingstr:/etc/ingstr:ro
 
-      # SQLite state DB. Named volume so it persists across container churn.
+      # SQLite state DB. Per-org named volume so it persists across
+      # container churn. Compose prefixes volume names with the project
+      # name (the directory the compose file lives in), giving you
+      # automatic per-org isolation when you organise as
+      # /etc/ingstr/<org>/compose.yml.
       - ingstr-state:/var/lib/ingstr
     environment:
       INGSTR_CONFIG: /etc/ingstr/config.yml
-
-      # Required: Qdrant write API key. Do NOT commit. Provide via:
-      #   docker compose --env-file /etc/ingstr/secrets.env run ...
-      # or via host environment.
       QDRANT_RW_API_KEY: ${QDRANT_RW_API_KEY:?QDRANT_RW_API_KEY must be set}
-    # Logs go to docker journal — structlog already emits JSON to stdout.
-
-# Peers (qdrant, ollama) live on this externally-managed network. Replace the
-# name with whatever the upstream Ansible role created.
-networks:
-  rag-net:
-    external: true
+    # Logs go to docker journald — structlog already emits JSON to stdout.
 
 volumes:
+  # Org data NFS volume. Docker mounts this NFS share when the container
+  # starts, scoped to the container's network namespace. The mount is
+  # invisible to the host. For deploys where the data lives on a host
+  # bind mount instead, replace this whole block with a bind volume.
+  org_data:
+    driver: local
+    driver_opts:
+      type: nfs
+      o: "addr=${ORG_DATA_NFS_ADDR:?ORG_DATA_NFS_ADDR must be set},${ORG_DATA_NFS_OPTIONS:-soft,ro,nolock}"
+      device: ${ORG_DATA_NFS_DEVICE:?ORG_DATA_NFS_DEVICE must be set}
+
+  # Per-org state DB volume. Project-name prefix gives multi-org
+  # isolation automatically.
   ingstr-state:

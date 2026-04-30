@@ -4,8 +4,12 @@ Documentation=https://github.com/jobcpf/ingstr-app
 
 [Path]
 # Fires whenever the upstream rsync (or whatever populates the source tree)
-# touches the sentinel file. Adjust path to match your source mount.
-PathChanged=/mnt/raid_arc/.last_sync
+# touches the sentinel file. The path MUST be host-visible: org data is
+# mounted inside the container only (not on otter's host), so the upstream
+# sync should write its sentinel to a host-side directory like
+# /var/lib/ingstr/triggers/<org>/last_sync rather than into the org data
+# tree itself.
+PathChanged=/var/lib/ingstr/triggers/last_sync
 
 # Triggers the .service of the same name unless overridden:
 Unit=ingstr-ingest.service

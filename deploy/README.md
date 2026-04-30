@@ -2,10 +2,20 @@
 
 End-to-end walkthrough: tag a release on GitHub, let CI publish the image to GHCR, pull on otter, run a smoke test, then wire up systemd triggering.
 
-Assumes:
-- Qdrant and Ollama are already running on otter, exposed on a shared Docker network (`rag-net` in the example — change to whatever Ansible created).
-- `compiled_plan.yml` and `group_gid_map.yml` are mounted at `/mnt/registry/` on the host.
-- The source data tree is mounted at `/mnt/raid_arc/` (NFS, read-only).
+## Topology (per-org isolation)
+
+One Ingstr deploy = one organisation. Multiple orgs share Ollama and the registry; everything else is per-org.
+
+| Resource | Scope | Where it lives |
+|---|---|---|
+| **Ollama** | Shared | One container on otter, addressed by LAN IP from each org's Ingstr |
+| **Qdrant** | Per-org | Per-org container with a per-org write API key (managed by Ansible) |
+| **Registry** (`compiled_plan.yml`, `group_gid_map.yml`) | Shared | NFS-mounted on otter at `/mnt/registry/`, bind-mounted into each container |
+| **Org data** | Per-org | NFS-mounted **inside the container** via a Docker NFS volume — otter's host filesystem never sees the org's data |
+| **Config** (`config.yml`, `compose.yml`, `secrets.env`) | Per-org | Host-side at `/etc/ingstr/<org>/`, deployed by Ansible |
+| **State DB** | Per-org | Per-org named Docker volume; project-name prefix in compose gives automatic isolation |
+
+The "data NFS-in-container" pattern is the load-bearing decision: by mounting org data only inside the container, otter's host operator never has filesystem access to org documents. Compose handles this natively via a `local` volume with the `nfs` driver — see [compose.example.yml](compose.example.yml).
 
 ---
 
@@ -48,17 +58,27 @@ Watch the run at https://github.com/jobcpf/ingstr-app/actions. On success the im
 
 ## 3. Prepare otter
 
-Install the operator-managed pieces on otter at `/etc/ingstr/`:
+Install the operator-managed pieces on otter under `/etc/ingstr/<org>/` (one directory per org):
 
 ```bash
-sudo mkdir -p /etc/ingstr
-sudo cp config.example.yml /etc/ingstr/config.yml      # then edit
-sudo cp deploy/compose.example.yml /etc/ingstr/compose.yml
-echo "QDRANT_RW_API_KEY=..." | sudo tee /etc/ingstr/secrets.env
-sudo chmod 0600 /etc/ingstr/secrets.env
+ORG=arc
+sudo mkdir -p /etc/ingstr/${ORG}
+sudo cp config.example.yml         /etc/ingstr/${ORG}/config.yml
+sudo cp deploy/compose.example.yml /etc/ingstr/${ORG}/compose.yml
+
+# Per-org secrets — Qdrant write key + NFS mount details for the org's data share.
+sudo tee /etc/ingstr/${ORG}/secrets.env > /dev/null <<EOF
+QDRANT_RW_API_KEY=...
+ORG_DATA_NFS_ADDR=10.0.0.10
+ORG_DATA_NFS_DEVICE=:/exports/${ORG}/drive
+INGSTR_VERSION=v0.1.0-beta
+EOF
+sudo chmod 0600 /etc/ingstr/${ORG}/secrets.env
 ```
 
-Edit `/etc/ingstr/config.yml` with the real paths and the Qdrant collection name. The `compose.yml` reads `QDRANT_RW_API_KEY` from `/etc/ingstr/secrets.env` via `--env-file` (see step 5).
+Edit `/etc/ingstr/${ORG}/config.yml` with the real Qdrant URL and collection name; defaults already match the standard mount points.
+
+The shared registry is host-mounted on otter once at `/mnt/registry/` and bind-mounted into every org's container — no per-org config needed there.
 
 ---
 
@@ -81,19 +101,20 @@ For unattended pulls, store the PAT under root's `~/.docker/config.json` or a cr
 ## 5. Smoke test
 
 ```bash
-cd /etc/ingstr
+ORG=arc
+cd /etc/ingstr/${ORG}
 
 # Connectivity to qdrant + ollama + NFS + plan.
-docker compose --env-file /etc/ingstr/secrets.env run --rm ingstr health
+docker compose --env-file secrets.env run --rm ingstr health
 
 # What would change without writing.
-docker compose --env-file /etc/ingstr/secrets.env run --rm ingstr ingest --dry-run
+docker compose --env-file secrets.env run --rm ingstr ingest --dry-run
 
 # Real run.
-docker compose --env-file /etc/ingstr/secrets.env run --rm ingstr ingest
+docker compose --env-file secrets.env run --rm ingstr ingest
 
 # Counts and last-run timestamps.
-docker compose --env-file /etc/ingstr/secrets.env run --rm ingstr stats
+docker compose --env-file secrets.env run --rm ingstr stats
 ```
 
 Logs are JSON to stdout, captured by docker / journald.
@@ -110,21 +131,21 @@ sudo systemctl daemon-reload
 sudo systemctl enable --now ingstr-ingest.path
 ```
 
-The `.path` unit watches `/mnt/raid_arc/.last_sync`. When something upstream (e.g. an `rsync` from the source host) touches that file, the `.service` runs `docker compose run ingstr ingest` and exits.
+The `.path` unit watches a host-visible sentinel file. Because org data lives only inside the container (NFS mounted by Docker, invisible to the host), the upstream sync should write its sentinel to a host-side path like `/var/lib/ingstr/triggers/<org>/last_sync` rather than into the data tree itself. When that file changes, the `.service` runs `docker compose run ingstr ingest` and exits.
 
 Verify:
 
 ```bash
 systemctl status ingstr-ingest.path
 journalctl -u ingstr-ingest.service -f
-sudo touch /mnt/raid_arc/.last_sync     # manual trigger
+sudo touch /var/lib/ingstr/triggers/last_sync   # manual trigger
 ```
 
 ---
 
 ## How the dynamic group permissions work
 
-Files on `/mnt/raid_arc/` are mode 0640 owned by canonical groups (`arc_g0_engineering_global`, etc.). To read them, the container process needs those GIDs as supplementary groups. Approach:
+Org data files (mode 0640, owned by canonical groups like `arc_g0_engineering_global`) are mounted inside the container via NFS. To read them, the container process needs those GIDs as supplementary groups. Approach:
 
 1. The container starts as root.
 2. `docker-entrypoint.sh` reads `${INGSTR_CONFIG}` to find the path of `group_gid_map.yml`.
@@ -141,24 +162,33 @@ Consequences:
 
 ## Updating to a new image version
 
+The image tag is supplied via `INGSTR_VERSION` in `secrets.env` — no compose.yml edit needed:
+
 ```bash
 # On otter:
+ORG=arc
 docker pull ghcr.io/jobcpf/ingstr-app:v0.2.0
-sudo sed -i 's|ingstr:v0.1.0|ingstr:v0.2.0|' /etc/ingstr/compose.yml
-docker compose --env-file /etc/ingstr/secrets.env run --rm ingstr health
+sudo sed -i 's|^INGSTR_VERSION=.*|INGSTR_VERSION=v0.2.0|' /etc/ingstr/${ORG}/secrets.env
+docker compose --env-file /etc/ingstr/${ORG}/secrets.env run --rm ingstr health
 ```
 
-Or pin to `:latest` in `compose.yml` and just `docker pull` — but explicit version tags make rollbacks trivial (`docker pull v0.1.0` and edit the file back).
+Or omit `INGSTR_VERSION` entirely (the compose default is `:latest`) — but explicit version tags make rollbacks trivial.
 
 ---
 
 ## Troubleshooting
 
-**"Permission denied" reading files on /mnt/raid_arc/**
+**"Permission denied" reading files in `/mnt/data/`**
 The entrypoint couldn't derive supplementary GIDs. Check:
 - Is `/etc/ingstr/config.yml` readable inside the container? (`docker compose run ingstr ls -la /etc/ingstr/`)
 - Does `plan.group_gid_map_path` resolve to a readable file on the mount? (`docker compose run ingstr cat /mnt/registry/group_gid_map.yml`)
 - Did the operator pass `--user`, bypassing the privilege-drop logic? Remove `--user` and let the entrypoint handle it.
+
+**Org data NFS volume fails to mount**
+Docker reports the NFS mount error when the container starts. Check:
+- `ORG_DATA_NFS_ADDR` and `ORG_DATA_NFS_DEVICE` in `secrets.env` resolve to a real NFS export the host can reach (`showmount -e ${ORG_DATA_NFS_ADDR}` from otter)
+- The NFS server allows mounts from otter's IP
+- For NFSv4-only servers, append `nfsvers=4` to `ORG_DATA_NFS_OPTIONS`
 
 **`PlanError: ... absent from compiled_plan.yml's required_groups`**
 `group_gid_map.yml` is stale. Regenerate upstream via `export_group_gids.yml` and redeploy `/mnt/registry/group_gid_map.yml`.

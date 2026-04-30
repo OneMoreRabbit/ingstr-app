@@ -1,38 +1,55 @@
 # ──────────────────────────────────────────────────────────────────────
 # Ingstr configuration — example
 #
-# Copy to /etc/ingstr/config.yml (or pass --config) and edit. All paths
-# below must exist and be readable at runtime; Ingstr fails fast if not.
+# One config = one organisation (brief §2). Multi-org deployments run
+# multiple Ingstr containers, each with their own config + Qdrant
+# collection + state volume.
+#
+# All paths in this file are CONTAINER-INTERNAL. The compose.yml that
+# accompanies this config decides what backs them on the host (NFS
+# volume, host bind mount, etc.).
 # ──────────────────────────────────────────────────────────────────────
 
-org: arc                                  # logging label only; one org per process
+org: arc                                  # logging label only
 
 # ── What to ingest ───────────────────────────────────────────────────
+# `source.root` is the container-internal mount point for this org's
+# data share. Production deploys mount the org's NFS share here from
+# inside the container (so the host filesystem stays clean of org data).
 source:
-  root: /mnt/raid_arc/drive
+  root: /mnt/data
   follow_symlinks: false
-  exclude_patterns:                       # gitignore-style globs, applied to relative paths
+  exclude_patterns:                       # gitignore-style globs
     - "**/.tmp/**"
     - "**/~$*"
     - "**/Thumbs.db"
 
 # ── Where to find classification metadata ────────────────────────────
-# Both files come from upstream (rbac-compile + export_group_gids.yml).
-# Ingstr only reads them — never generates or mutates.
+# `compiled_plan.yml` and `group_gid_map.yml` come from upstream
+# (rbac-compile + export_group_gids.yml). They are shared across all
+# orgs on a given host: the registry is mounted on otter at /mnt/registry
+# and bind-mounted into each container at the same path.
+# Ingstr only reads — never generates or mutates.
 plan:
   compiled_plan_path: /mnt/registry/compiled_plan.yml
   group_gid_map_path: /mnt/registry/group_gid_map.yml
-  reload_on_run: true                     # always re-read at start of each run
+  reload_on_run: true                     # re-read at the start of each run
 
 # ── Where to embed ───────────────────────────────────────────────────
+# Ollama instance is shared across orgs on the same network.
+# vector_dim MUST match the Qdrant collection's vector size; mismatch
+# is a fail-fast condition at startup.
 embedding:
-  endpoint: http://ollama:11434
+  endpoint: http://172.16.32.32:11434
   model: nomic-embed-text
-  vector_dim: 768                         # MUST match the Qdrant collection's vector size
+  vector_dim: 768
   timeout_seconds: 30
   batch_size: 16                          # chunks per HTTP call
 
 # ── Where to store ───────────────────────────────────────────────────
+# Per-org Qdrant collection on a per-org Qdrant container. URL, API key
+# (via env var), and collection name are all org-specific and managed
+# by Ansible at deploy time.
 qdrant:
   url: http://qdrant_arc:6333
   api_key_env: QDRANT_RW_API_KEY          # name of env var holding the key
@@ -56,6 +73,8 @@ parsers:
   html:  unstructured
 
 # ── State tracking ───────────────────────────────────────────────────
+# Container-internal path; backed by a per-org named Docker volume so
+# the SQLite DB persists across container churn.
 state:
   db_path: /var/lib/ingstr/state.db
 
