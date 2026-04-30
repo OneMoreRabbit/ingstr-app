@@ -14,7 +14,7 @@ from typer.testing import CliRunner
 from ingstr import __version__
 from ingstr.cli import app
 
-runner = CliRunner(mix_stderr=False)
+runner = CliRunner()
 
 
 _MIN_CFG = """\
