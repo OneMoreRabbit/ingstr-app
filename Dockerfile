@@ -54,14 +54,13 @@ RUN /opt/venv/bin/python -m spacy download en_core_web_sm
 
 # NLTK: data files go to /opt/venv/share/nltk_data so they ship with the
 # venv copy. NLTK_DATA env var must be set in BOTH stages for it to find
-# them. nltk.download() returns False (without raising) for packages not
-# in the index, so listing newer/older variants together is safe across
-# NLTK versions. `punkt` + `punkt_tab` cover sentence tokenisation;
-# `averaged_perceptron_tagger` covers POS tagging.
+# them. We use a separate script so per-package failures print diagnostic
+# output to the build log rather than dying silently inside a list comp.
 ENV NLTK_DATA=/opt/venv/share/nltk_data
+COPY scripts/download_nlp_data.py /tmp/download_nlp_data.py
 RUN mkdir -p /opt/venv/share/nltk_data \
- && /opt/venv/bin/python -c \
-    "import nltk; [nltk.download(p, download_dir='/opt/venv/share/nltk_data', quiet=True) for p in ['punkt', 'punkt_tab', 'averaged_perceptron_tagger']]"
+ && /opt/venv/bin/python /tmp/download_nlp_data.py \
+ && rm /tmp/download_nlp_data.py
 
 # ────────────────────────────────────────────────────────────────────────────
 FROM python:${PYTHON_VERSION}-slim AS runtime
