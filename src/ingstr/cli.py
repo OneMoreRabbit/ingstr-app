@@ -69,7 +69,7 @@ def ingest(
             cfg.qdrant, api_key
         ) as qdrant:
             try:
-                qdrant.assert_collection_exists(cfg.embedding.vector_dim)
+                qdrant.verify_collection(cfg.embedding.vector_dim)
             except UpstreamUnavailable as e:
                 typer.echo(f"upstream unavailable: {e}", err=True)
                 raise typer.Exit(code=_EXIT_UPSTREAM) from e
@@ -191,7 +191,7 @@ def health(config: ConfigOption = DEFAULT_CONFIG_PATH) -> None:
             checks.append(("qdrant.connect", q_ok, cfg.qdrant.url))
             if q_ok:
                 try:
-                    qdrant.assert_collection_exists(cfg.embedding.vector_dim)
+                    qdrant.verify_collection(cfg.embedding.vector_dim)
                     checks.append(
                         (
                             "qdrant.collection",

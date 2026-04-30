@@ -34,9 +34,9 @@ class QdrantWriter:
     already-provisioned collection: assert/health, upsert, delete-by-source,
     and count.
 
-    Ingstr does NOT create the collection. `assert_collection_exists` fails
-    fast on a missing collection or a mismatched vector dim, so a malformed
-    deploy is caught before any work happens.
+    Ingstr does NOT create the collection. `verify_collection` fails fast on
+    a missing collection or a mismatched vector dim, so a malformed deploy is
+    caught before any work happens.
     """
 
     def __init__(
@@ -53,12 +53,16 @@ class QdrantWriter:
             timeout=cfg.timeout_seconds,
         )
 
-    def assert_collection_exists(self, expected_vector_dim: int) -> None:
+    def verify_collection(self, expected_vector_dim: int) -> None:
         """Confirm the collection exists with the expected vector dim, else raise.
 
         Distinguishes 404 (missing collection — operator deploy issue) from
         other failures (network, auth) so the error message points at the
         right thing to fix.
+
+        (Named `verify_collection` rather than `assert_collection_exists` to
+        avoid colliding with `unittest.mock`'s deny-list of `assert_*`
+        attribute names — purely an ergonomics concern, behaviour unchanged.)
         """
         try:
             info = self._client.get_collection(self.cfg.collection)

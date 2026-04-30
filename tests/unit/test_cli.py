@@ -123,7 +123,7 @@ def test_ingest_dry_run_with_mocks(tmp_path: Path, monkeypatch: pytest.MonkeyPat
     # Empty source root → no files seen → exit 0 even with all mocks raising
     with patch("ingstr.cli.EmbeddingClient") as Embed, \
          patch("ingstr.cli.QdrantWriter") as Qdrant:
-        Qdrant.return_value.__enter__.return_value.assert_collection_exists.return_value = None
+        Qdrant.return_value.__enter__.return_value.verify_collection.return_value = None
         Embed.return_value.__enter__.return_value.embed.return_value = []
         result = runner.invoke(
             app, ["ingest", "--config", str(cfg), "--dry-run"]
@@ -144,7 +144,7 @@ def test_health_all_passing(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> 
         Embed.return_value.__enter__.return_value.health.return_value = True
         q = Qdrant.return_value.__enter__.return_value
         q.health.return_value = True
-        q.assert_collection_exists.return_value = None
+        q.verify_collection.return_value = None
         result = runner.invoke(app, ["health", "--config", str(cfg)])
 
     assert result.exit_code == 0
@@ -164,7 +164,7 @@ def test_health_failing_check_exits_two(tmp_path: Path, monkeypatch: pytest.Monk
          patch("ingstr.cli.QdrantWriter") as Qdrant:
         Embed.return_value.__enter__.return_value.health.return_value = False
         Qdrant.return_value.__enter__.return_value.health.return_value = True
-        Qdrant.return_value.__enter__.return_value.assert_collection_exists.return_value = None
+        Qdrant.return_value.__enter__.return_value.verify_collection.return_value = None
         result = runner.invoke(app, ["health", "--config", str(cfg)])
 
     assert result.exit_code == 2

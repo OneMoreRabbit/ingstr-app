@@ -95,6 +95,12 @@ def run_ingest(
             _record_per_file_error(state, path, error=str(e))
             summary.files_errored += 1
             continue
+        except UpstreamUnavailable:
+            # Systemic failure — Ollama/Qdrant unreachable. Don't swallow:
+            # propagate so the CLI can map to exit code 2 and abort the run.
+            # Must come BEFORE the IngstrError handler since UpstreamUnavailable
+            # is a subclass.
+            raise
         except IngstrError as e:
             _log.error("file_failed", source_path=abs_path, error=str(e))
             _record_per_file_error(state, path, error=str(e))

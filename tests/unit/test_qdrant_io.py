@@ -40,17 +40,17 @@ def _point(idx: int = 0) -> QdrantPoint:
     )
 
 
-# ── assert_collection_exists ────────────────────────────────────────────────
+# ── verify_collection ────────────────────────────────────────────────
 
 
-def test_assert_collection_happy_path() -> None:
+def test_verify_collection_happy_path() -> None:
     client = MagicMock()
     client.get_collection.return_value = _collection_info(vector_size=4)
-    _writer(client).assert_collection_exists(expected_vector_dim=4)
+    _writer(client).verify_collection(expected_vector_dim=4)
     client.get_collection.assert_called_once_with("documents")
 
 
-def test_assert_collection_404_raises_with_helpful_message() -> None:
+def test_verify_collection_404_raises_with_helpful_message() -> None:
     client = MagicMock()
     client.get_collection.side_effect = UnexpectedResponse(
         status_code=404,
@@ -59,10 +59,10 @@ def test_assert_collection_404_raises_with_helpful_message() -> None:
         headers=None,
     )
     with pytest.raises(UpstreamUnavailable, match="does not exist"):
-        _writer(client).assert_collection_exists(expected_vector_dim=4)
+        _writer(client).verify_collection(expected_vector_dim=4)
 
 
-def test_assert_collection_other_unexpected_response_raises() -> None:
+def test_verify_collection_other_unexpected_response_raises() -> None:
     client = MagicMock()
     client.get_collection.side_effect = UnexpectedResponse(
         status_code=403,
@@ -71,30 +71,30 @@ def test_assert_collection_other_unexpected_response_raises() -> None:
         headers=None,
     )
     with pytest.raises(UpstreamUnavailable, match="get_collection"):
-        _writer(client).assert_collection_exists(expected_vector_dim=4)
+        _writer(client).verify_collection(expected_vector_dim=4)
 
 
-def test_assert_collection_network_failure_raises() -> None:
+def test_verify_collection_network_failure_raises() -> None:
     client = MagicMock()
     client.get_collection.side_effect = ConnectionError("connection refused")
     with pytest.raises(UpstreamUnavailable, match="unreachable"):
-        _writer(client).assert_collection_exists(expected_vector_dim=4)
+        _writer(client).verify_collection(expected_vector_dim=4)
 
 
-def test_assert_collection_dim_mismatch_raises() -> None:
+def test_verify_collection_dim_mismatch_raises() -> None:
     client = MagicMock()
     client.get_collection.return_value = _collection_info(vector_size=768)
     with pytest.raises(UpstreamUnavailable, match=r"vector size 768 != configured vector_dim 4"):
-        _writer(client).assert_collection_exists(expected_vector_dim=4)
+        _writer(client).verify_collection(expected_vector_dim=4)
 
 
-def test_assert_collection_named_vectors_rejected() -> None:
+def test_verify_collection_named_vectors_rejected() -> None:
     client = MagicMock()
     info = MagicMock()
     info.config.params.vectors = {"text": VectorParams(size=4, distance=Distance.COSINE)}
     client.get_collection.return_value = info
     with pytest.raises(UpstreamUnavailable, match="named vectors"):
-        _writer(client).assert_collection_exists(expected_vector_dim=4)
+        _writer(client).verify_collection(expected_vector_dim=4)
 
 
 # ── upsert_points ───────────────────────────────────────────────────────────
