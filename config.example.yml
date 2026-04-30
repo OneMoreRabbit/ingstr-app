@@ -64,9 +64,13 @@ chunking:
   chunk_overlap_chars: 200
 
 # ── Per-file-type parser routing (MVP: unstructured handles all) ─────
+# Each entry must match a per-format extra installed in the image — see
+# pyproject.toml's `unstructured[pdf,docx,pptx,xlsx,md,html]` dependency.
+# Adding a new file type here without its extra in pyproject = runtime error.
 parsers:
   pdf:   unstructured
   docx:  unstructured
+  pptx:  unstructured
   xlsx:  unstructured
   txt:   unstructured
   md:    unstructured

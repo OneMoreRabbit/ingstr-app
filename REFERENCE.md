@@ -103,6 +103,7 @@ chunking:
 parsers:                                  # MVP: unstructured handles all types
   pdf:   unstructured
   docx:  unstructured
+  pptx:  unstructured
   xlsx:  unstructured
   txt:   unstructured
   md:    unstructured
@@ -523,6 +524,12 @@ Required fields per file event:
 ```
 
 **File contents are never logged at INFO level** — only at DEBUG, and only when `logging.log_full_query: true`.
+
+### NLP models in the image
+
+`unstructured` lazy-loads NLP models (spaCy `en_core_web_sm`, NLTK `punkt`/`punkt_tab`/`averaged_perceptron_tagger`) the first time it parses a file that needs them. Without intervention these would fail under the privilege-dropped `ingstr` user with `[Errno 13] Permission denied` writing into `/opt/venv`. The Dockerfile builder pre-downloads them at build time (as root) into `/opt/venv` and `/opt/venv/share/nltk_data`, with `NLTK_DATA` set in both stages. `unstructured` therefore never attempts a runtime download and the privilege-dropped process only ever reads from `/opt/venv`.
+
+When upgrading `unstructured`, check its release notes for any new lazy-loaded model dependencies — they will need to be added to the same builder-stage download step.
 
 ## 2.10 Testing
 

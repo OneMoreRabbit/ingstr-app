@@ -443,6 +443,31 @@ notes.
   but no GID column. The GID mapping comes from the separately-generated
   `group_gid_map.yml`. The brief §7 anticipated this might need adapting
   and it did. Don't assume the plan alone is enough for classification.
+- **`unstructured` per-format extras are not optional.** The library's
+  `partition_<fmt>()` backends are gated behind per-format pip extras
+  (`[pdf]`, `[docx]`, `[pptx]`, etc.) that fail at runtime with
+  "dependencies not installed" if the extra wasn't pip-installed. The
+  initial pyproject had bare `unstructured>=0.14` and silently shipped
+  an image that could only parse `.txt` / `.md` / `.html`. PDFs and
+  Office formats all failed. Fixed by pinning
+  `unstructured[pdf,docx,pptx,xlsx,md,html]`. **Rule:** the
+  `config.yml:parsers` map and the `unstructured[...]` extras list in
+  `pyproject.toml` must stay in lockstep — one without the other is a
+  silent runtime bug.
+- **`unstructured` lazy-downloads NLP models at runtime — must
+  pre-install at build time.** First versions of the image hit
+  `[Errno 13] Permission denied` writing `en_core_web_sm` into
+  `/opt/venv/lib/python3.12/site-packages` because the runtime container
+  drops privileges to the unprivileged `ingstr` user before `unstructured`
+  tries to install the spaCy model on first use. Same problem will hit
+  any code path that triggers NLTK data downloads. Fixed by
+  `python -m spacy download en_core_web_sm` and
+  `python -m nltk.downloader ... punkt punkt_tab averaged_perceptron_tagger`
+  in the builder stage as root. **Rule:** any pip dep that does
+  lazy-download / cache-on-first-use must have the relevant data
+  pre-fetched in the Dockerfile builder, otherwise it'll fail at parse
+  time the first time the privilege-dropped runtime hits that code path.
+  When upgrading `unstructured`, check release notes for new model deps.
 
 ---
 

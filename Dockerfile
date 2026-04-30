@@ -37,13 +37,33 @@ RUN python -m venv /opt/venv \
  && /opt/venv/bin/pip install --upgrade pip \
  && /opt/venv/bin/pip install .
 
+# Pre-download NLP models that `unstructured` lazy-loads at parse time.
+# Doing this at build time (as root) bakes the data into /opt/venv so the
+# runtime container — which drops privileges to a non-root `ingstr` user
+# via setpriv — does not try to write into the venv at parse time.
+#
+# spaCy: en_core_web_sm is installed as a pip-style package under the venv
+# and gets copied with the rest of /opt/venv to the runtime stage.
+#
+# NLTK: data files go to /opt/venv/share/nltk_data so they ship with the
+# venv copy. NLTK_DATA env var must be set in BOTH stages for it to find
+# them. `punkt` + `punkt_tab` cover sentence tokenisation across NLTK
+# versions; `averaged_perceptron_tagger` covers POS tagging used by some
+# unstructured backends.
+ENV NLTK_DATA=/opt/venv/share/nltk_data
+RUN /opt/venv/bin/python -m spacy download en_core_web_sm \
+ && mkdir -p /opt/venv/share/nltk_data \
+ && /opt/venv/bin/python -m nltk.downloader -d /opt/venv/share/nltk_data \
+        punkt punkt_tab averaged_perceptron_tagger
+
 # ────────────────────────────────────────────────────────────────────────────
 FROM python:${PYTHON_VERSION}-slim AS runtime
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     PATH="/opt/venv/bin:${PATH}" \
-    INGSTR_CONFIG=/etc/ingstr/config.yml
+    INGSTR_CONFIG=/etc/ingstr/config.yml \
+    NLTK_DATA=/opt/venv/share/nltk_data
 
 # Runtime system deps:
 #   libmagic1     — unstructured uses libmagic for file-type sniffing

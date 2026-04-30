@@ -112,7 +112,7 @@ See [deploy/README.md](deploy/README.md) for the full walkthrough — GitHub rep
 
 **Recovering from errors.** Per-file errors are recorded in the state DB's `last_error` column and re-attempted on the next run. Systemic failures (Qdrant unreachable, plan unreadable) abort the run with a non-zero exit code; fix the underlying issue and re-invoke. Re-running an incremental ingest with no changes is a no-op.
 
-**The `unstructured` parser.** MVP uses `unstructured` without the `[local-inference]` extra to keep the install lean (those extras pull in multi-gigabyte ML dependencies). The Docker image installs `libmagic1` and `poppler-utils` for the rule-based partitioners; PDFs with complex layouts may parse less accurately than they would with the local-inference path. If higher fidelity is needed, install `unstructured[local-inference]` separately or adjust the dependency in a downstream fork.
+**The `unstructured` parser.** MVP installs `unstructured[pdf,docx,pptx,xlsx,md,html]` — each per-format extra brings in its own backend (`pypdf`, `python-docx`, `python-pptx`, `openpyxl`, etc.). The `[local-inference]` extra is **not** installed; that one pulls in multi-gigabyte ML dependencies for OCR and is only useful for image-only PDFs. PDFs with complex layouts may parse less accurately than they would with `[local-inference]`; install it separately or build a downstream variant if higher fidelity is needed. Adding a new file type to `config.yml:parsers` requires its extra to be added to `pyproject.toml` too — otherwise the image will fail at runtime with "dependencies not installed".
 
 ## Development setup
 
