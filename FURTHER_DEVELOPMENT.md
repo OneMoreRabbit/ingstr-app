@@ -468,6 +468,23 @@ notes.
   pre-fetched in the Dockerfile builder, otherwise it'll fail at parse
   time the first time the privilege-dropped runtime hits that code path.
   When upgrading `unstructured`, check release notes for new model deps.
+- **`unstructured`'s PDF layout-analysis path needs OS-level graphics
+  libs.** Graphics-heavy PDFs (flyers, marketing material, embedded
+  vector graphics) trigger code paths that load `libGL.so.1` and
+  glib via PIL/pillow. Without `libgl1` + `libglib2.0-0` apt-installed
+  in the runtime stage, these PDFs fail with
+  `failed to parse <foo>.pdf: libGL.so.1: cannot open shared object
+  file`. Plain-text PDFs (Word exports, contracts) don't hit this path
+  and used to succeed silently, masking the gap. **Rule:** when adding
+  per-format support to `unstructured`, audit not just pip extras but
+  also the OS-level libs the format's backend can dlopen. Pillow,
+  OpenCV-derived deps, and PDF layout libs are the usual suspects.
+- **spacy and nltk are NOT transitive deps of `unstructured`'s
+  per-format extras.** The `[pdf,docx,pptx,xlsx,md,html]` extras don't
+  pull either in. They have to be declared as direct deps in
+  `pyproject.toml` (`spacy>=3.7,<4`, `nltk>=3.8,<4`) — putting them as
+  `pip install` lines in the Dockerfile hides what the package actually
+  needs.
 
 ---
 

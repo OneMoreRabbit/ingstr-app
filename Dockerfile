@@ -70,15 +70,26 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     NLTK_DATA=/opt/venv/share/nltk_data
 
 # Runtime system deps:
-#   libmagic1     — unstructured uses libmagic for file-type sniffing
-#   poppler-utils — PDF text extraction (pdftotext)
-#   util-linux    — provides setpriv (used by entrypoint to drop privileges)
-#   tini          — PID 1 / signal handling for long-running ingest jobs
+#   libmagic1       — unstructured uses libmagic for file-type sniffing
+#   poppler-utils   — PDF text extraction (pdftotext)
+#   libgl1          — provides libGL.so.1 for unstructured's PDF layout-
+#                     analysis path on graphics-heavy PDFs (vector graphics,
+#                     embedded images). Without it: "libGL.so.1: cannot open
+#                     shared object file" at parse time. Pure-text PDFs
+#                     don't hit this code path; flyers and design-heavy
+#                     documents do. NOT related to [local-inference] OCR —
+#                     just basic layout detection.
+#   libglib2.0-0    — common companion to libgl1; some unstructured paths
+#                     also reach for glib via PIL/pillow.
+#   util-linux      — provides setpriv (used by entrypoint to drop privileges)
+#   tini            — PID 1 / signal handling for long-running ingest jobs
 #   ca-certificates — for httpx → Ollama / qdrant-client over TLS
 RUN apt-get update \
  && apt-get install -y --no-install-recommends \
         libmagic1 \
         poppler-utils \
+        libgl1 \
+        libglib2.0-0 \
         util-linux \
         tini \
         ca-certificates \
