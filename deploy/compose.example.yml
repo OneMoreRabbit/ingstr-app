@@ -9,10 +9,18 @@
 # by Ansible at deploy time):
 #
 #   QDRANT_RW_API_KEY      (required)  per-org Qdrant write key
+#   QDRANT_NETWORK         (required)  per-org Docker network name, e.g. "qdrant_arc_net"
 #   INGSTR_VERSION         (optional)  image tag, defaults to "latest"
 #   ORG_DATA_NFS_ADDR      (required)  NFS server address, e.g. "10.0.0.10"
 #   ORG_DATA_NFS_DEVICE    (required)  NFS export path, e.g. ":/exports/arc/drive"
 #   ORG_DATA_NFS_OPTIONS   (optional)  mount opts, defaults to "soft,ro,nolock"
+#
+# QDRANT_NETWORK names a per-org external network created by the Qdrant
+# compose stack. The Qdrant container joins that network with service
+# name `qdrant_<org>` (so Ingstr's config.yml:qdrant.url reads
+# "http://qdrant_<org>:6333" and Docker DNS resolves it inside the
+# network). Qdrant has no published ports — only the future query proxy
+# does — so the per-org network is the only path Ingstr can reach it.
 #
 # Ingstr is a one-shot job. Do NOT `docker compose up`. Invoke runs
 # explicitly:
@@ -27,6 +35,10 @@
 services:
   ingstr:
     image: ghcr.io/jobcpf/ingstr-app:${INGSTR_VERSION:-latest}
+    networks:
+      # Per-org network created by the Qdrant compose stack. Lets Ingstr
+      # resolve `qdrant_<org>` via Docker DNS without LAN exposure.
+      - qdrant_net
     volumes:
       # Org data: NFS mounted by Docker INTO the container.
       # otter's host filesystem doesn't see this share.
@@ -52,6 +64,14 @@ services:
       INGSTR_CONFIG: /etc/ingstr/config.yml
       QDRANT_RW_API_KEY: ${QDRANT_RW_API_KEY:?QDRANT_RW_API_KEY must be set}
     # Logs go to docker journald — structlog already emits JSON to stdout.
+
+networks:
+  # Per-org Qdrant network. Created by the Qdrant compose stack as a
+  # regular bridge network; declared `external` here so Ingstr just
+  # joins it rather than trying to create it.
+  qdrant_net:
+    external: true
+    name: ${QDRANT_NETWORK:?QDRANT_NETWORK must be set}
 
 volumes:
   # Org data NFS volume. Docker mounts this NFS share when the container

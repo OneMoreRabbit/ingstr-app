@@ -1,14 +1,17 @@
 [Unit]
-Description=Ingstr — trigger ingest when /mnt/raid_arc/.last_sync changes
+Description=Ingstr — trigger ingest when the configured sentinel changes
 Documentation=https://github.com/jobcpf/ingstr-app
 
 [Path]
-# Fires whenever the upstream rsync (or whatever populates the source tree)
-# touches the sentinel file. The path MUST be host-visible: org data is
-# mounted inside the container only (not on otter's host), so the upstream
-# sync should write its sentinel to a host-side directory like
-# /var/lib/ingstr/triggers/<org>/last_sync rather than into the org data
-# tree itself.
+# The sentinel path is platform-deploy config, NOT an Ingstr contract.
+# Ingstr itself does not care where the sentinel lives — it's invoked by
+# the .service unit and runs to completion. Platform / Ansible decides
+# where the upstream sync writes its sentinel and edits this PathChanged=
+# line accordingly.
+#
+# Constraint: the path must be host-visible. Org data is mounted only
+# inside the container, so the sentinel cannot live in the data tree.
+# A typical host-side location is /var/lib/ingstr/triggers/<org>/last_sync.
 PathChanged=/var/lib/ingstr/triggers/last_sync
 
 # Triggers the .service of the same name unless overridden:

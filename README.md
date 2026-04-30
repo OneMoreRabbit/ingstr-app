@@ -106,7 +106,7 @@ See [deploy/README.md](deploy/README.md) for the full walkthrough — GitHub rep
 
 ## Operational notes
 
-**Triggering from systemd path units.** Ingstr is invoked when something upstream (e.g. an `rsync` from the source host) touches a sentinel file like `/mnt/raid_arc/.last_sync`. A systemd `path` unit watches the sentinel and triggers an associated `service` unit that runs `docker compose run ingstr ingest`. Example unit files in [deploy/systemd/](deploy/systemd/).
+**Triggering from systemd path units.** Ingstr is invoked when something upstream touches a host-visible sentinel file (path is platform-controlled — typically `/var/lib/ingstr/triggers/<org>/last_sync`). A systemd `path` unit watches the sentinel and triggers an associated `service` unit that runs `docker compose run ingstr ingest`. Example unit files in [deploy/systemd/](deploy/systemd/).
 
 **Checking stats.** `ingstr stats` is read-only and safe to run at any time. It reports file counts, chunk counts, error counts, and last-run timestamps.
 
