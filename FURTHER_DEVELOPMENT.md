@@ -316,6 +316,36 @@ names is a breaking change for any future library users.
 handling. Probably not worth it unless image size or install time
 becomes a real pain.
 
+### C10. Validate `meta.version` in `compiled_plan.yml` loader
+
+**What:** Ingstr's [plan.py](src/ingstr/plan.py) reads `required_groups`
+from `compiled_plan.yml` without checking the `meta.version` field
+(currently `"0.3"` per rbac-compile v0.3.1). A future schema bump that
+renames or restructures `required_groups` would silently misbehave —
+Ingstr would either find no groups (raising "list of strings" error,
+clear) or worse, find a different shape that happens to load.
+
+**Why now:** Forward compatibility. Downstream consumers (Ingstr,
+dprox) should fail fast on unknown schema versions rather than guess.
+The two-line addition is a `PlanError` if `meta.version` ≠ a known
+list (e.g. `["0.3"]`).
+
+**Cost:** Trivial — one validator, one test.
+
+### C11. Log `meta.source_hashes` + `compiler_version` at run start
+
+**What:** `compiled_plan.yml` (rbac-compile v0.3+) emits
+`meta.compiler_version` and `meta.source_hashes` (per-input-file
+SHA-256). Ingstr loads the plan but ignores these. Logging them at
+`run_started` would give ops a traceable "what plan version is this
+run using" link in journald.
+
+**Why now:** Easier diagnosis of "the plan changed and now ingest is
+behaving differently" reports. Cheap and informational.
+
+**Cost:** Trivial. Read the fields in plan.py, attach to the log
+record emitted by cli.py's `ingest` command at run start.
+
 ### C9. Additional file-format support (currently excluded)
 
 **What:** Operators currently exclude many file types via
