@@ -147,4 +147,4 @@ Ingstr targets Linux only. Develop and test on a Linux host.
 
 ## License
 
-Apache-2.0. See [LICENSE](LICENSE).
+MIT. See [LICENSE](LICENSE).
