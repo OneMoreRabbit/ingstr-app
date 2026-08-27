@@ -8,7 +8,7 @@ version = "0.1.0"
 description = "Document ingestion pipeline that walks a filesystem tree, parses + chunks documents, embeds via Ollama, and upserts into Qdrant with RBAC classification metadata."
 readme = "README.md"
 requires-python = ">=3.11"
-license = "Apache-2.0"
+license = "MIT"
 license-files = ["LICENSE"]
 authors = [
     { name = "Ingstr Contributors" },
@@ -17,7 +17,7 @@ keywords = ["qdrant", "rag", "ingestion", "embedding", "rbac", "ollama"]
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Intended Audience :: System Administrators",
-    "License :: OSI Approved :: Apache Software License",
+    "License :: OSI Approved :: MIT License",
     "Operating System :: POSIX :: Linux",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.11",

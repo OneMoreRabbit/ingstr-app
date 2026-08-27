@@ -50,3 +50,7 @@ ingstr-state.db
 # Local config that may contain secrets / paths
 config.local.yml
 .env
+# --- Atlas ---
+.atlas/
+.atlas-method/
+ATLAS-CONTEXT.md
