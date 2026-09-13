@@ -32,9 +32,11 @@ def test_known_gid_resolves_to_group_name():
 def test_unknown_gid_raises_unclassifiable():
     plan = _plan()
     p = Path("/some/file.pdf")
-    with patch.object(Path, "stat", return_value=_StatResult(st_gid=9999)):
-        with pytest.raises(UnclassifiableFile) as exc_info:
-            classify(p, plan)
+    with (
+        patch.object(Path, "stat", return_value=_StatResult(st_gid=9999)),
+        pytest.raises(UnclassifiableFile) as exc_info,
+    ):
+        classify(p, plan)
     assert exc_info.value.gid == 9999
     assert exc_info.value.path == p
 
@@ -42,6 +44,8 @@ def test_unknown_gid_raises_unclassifiable():
 def test_unclassifiable_message_mentions_path_and_gid():
     plan = _plan()
     p = Path("/some/file.pdf")
-    with patch.object(Path, "stat", return_value=_StatResult(st_gid=42)):
-        with pytest.raises(UnclassifiableFile, match="gid 42"):
-            classify(p, plan)
+    with (
+        patch.object(Path, "stat", return_value=_StatResult(st_gid=42)),
+        pytest.raises(UnclassifiableFile, match="gid 42"),
+    ):
+        classify(p, plan)

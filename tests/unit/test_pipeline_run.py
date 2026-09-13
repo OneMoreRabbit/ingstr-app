@@ -6,6 +6,8 @@ full-mode orphan cleanup, and error categorisation. The state DB is real
 (SQLite tmp file); embedder and qdrant are MagicMock.
 """
 
+from collections.abc import Iterator
+from contextlib import ExitStack, contextmanager
 from pathlib import Path
 from typing import Any
 from unittest.mock import MagicMock, patch
@@ -27,7 +29,6 @@ from ingstr.exceptions import IngstrError, UnclassifiableFile, UpstreamUnavailab
 from ingstr.pipeline import run_ingest
 from ingstr.plan import ResolvedPlan
 from ingstr.state import StateDB
-
 
 # ── Fixtures ────────────────────────────────────────────────────────────────
 
@@ -114,6 +115,20 @@ def _patches(
     }
 
 
+@contextmanager
+def _applied(patches: dict[str, Any]) -> Iterator[None]:
+    """Enter every patch from `_patches()` as a single context.
+
+    Every caller wants the whole stack, which is what `_patches`' docstring
+    always promised; entering them by name at each call site just made the
+    line too long to read.
+    """
+    with ExitStack() as stack:
+        for p in patches.values():
+            stack.enter_context(p)
+        yield
+
+
 def _mock_embedder() -> MagicMock:
     e = MagicMock()
     # Default: 4-dim vector per input, count matches input
@@ -139,7 +154,7 @@ def test_two_new_files_indexed(fs) -> None:
     qdrant = _mock_qdrant()
 
     patches = _patches()
-    with patches["classify"], patches["parse_file"], patches["chunk_elements"], patches["sha256_file"]:
+    with _applied(patches):
         summary = run_ingest(
             cfg, plan,
             state=state, embedder=embedder, qdrant=qdrant,
@@ -167,7 +182,7 @@ def test_unchanged_file_is_skipped(fs) -> None:
 
     # First run: index it.
     patches = _patches(hash_returns="hash1")
-    with patches["classify"], patches["parse_file"], patches["chunk_elements"], patches["sha256_file"]:
+    with _applied(patches):
         run_ingest(cfg, plan, state=state, embedder=embedder, qdrant=qdrant,
                    full=False, dry_run=False)
 
@@ -176,7 +191,7 @@ def test_unchanged_file_is_skipped(fs) -> None:
 
     # Second run: hash unchanged, group unchanged → skip
     patches = _patches(hash_returns="hash1")
-    with patches["classify"], patches["parse_file"], patches["chunk_elements"], patches["sha256_file"]:
+    with _applied(patches):
         summary = run_ingest(cfg, plan, state=state, embedder=embedder, qdrant=qdrant,
                              full=False, dry_run=False)
 
@@ -195,7 +210,7 @@ def test_changed_hash_triggers_reindex_with_delete_first(fs) -> None:
     qdrant = _mock_qdrant()
 
     patches = _patches(hash_returns="h1")
-    with patches["classify"], patches["parse_file"], patches["chunk_elements"], patches["sha256_file"]:
+    with _applied(patches):
         run_ingest(cfg, plan, state=state, embedder=embedder, qdrant=qdrant,
                    full=False, dry_run=False)
 
@@ -203,7 +218,7 @@ def test_changed_hash_triggers_reindex_with_delete_first(fs) -> None:
 
     # Hash differs → re-process: delete then upsert
     patches = _patches(hash_returns="h2")
-    with patches["classify"], patches["parse_file"], patches["chunk_elements"], patches["sha256_file"]:
+    with _applied(patches):
         summary = run_ingest(cfg, plan, state=state, embedder=embedder, qdrant=qdrant,
                              full=False, dry_run=False)
 
@@ -223,7 +238,7 @@ def test_full_mode_refreshes_payload_when_group_changes_without_reembed(fs) -> N
 
     # First run: index with group g0
     patches = _patches(classify_returns="arc_g0_engineering_global", hash_returns="h1")
-    with patches["classify"], patches["parse_file"], patches["chunk_elements"], patches["sha256_file"]:
+    with _applied(patches):
         run_ingest(cfg, plan, state=state, embedder=embedder, qdrant=qdrant,
                    full=False, dry_run=False)
 
@@ -232,7 +247,7 @@ def test_full_mode_refreshes_payload_when_group_changes_without_reembed(fs) -> N
 
     # Second run, full mode, same hash but new group → set_classification_group
     patches = _patches(classify_returns="arc_g18_any_global", hash_returns="h1")
-    with patches["classify"], patches["parse_file"], patches["chunk_elements"], patches["sha256_file"]:
+    with _applied(patches):
         summary = run_ingest(cfg, plan, state=state, embedder=embedder, qdrant=qdrant,
                              full=True, dry_run=False)
 
@@ -301,10 +316,9 @@ def test_systemic_error_propagates(fs) -> None:
     qdrant = _mock_qdrant()
 
     patches = _patches()
-    with patches["classify"], patches["parse_file"], patches["chunk_elements"], patches["sha256_file"]:
-        with pytest.raises(UpstreamUnavailable, match="ollama"):
-            run_ingest(cfg, plan, state=state, embedder=embedder, qdrant=qdrant,
-                       full=False, dry_run=False)
+    with _applied(patches), pytest.raises(UpstreamUnavailable, match="ollama"):
+        run_ingest(cfg, plan, state=state, embedder=embedder, qdrant=qdrant,
+                   full=False, dry_run=False)
 
 
 # ── Dry run ─────────────────────────────────────────────────────────────────
@@ -317,7 +331,7 @@ def test_dry_run_does_not_write_to_qdrant_or_state(fs) -> None:
     qdrant = _mock_qdrant()
 
     patches = _patches()
-    with patches["classify"], patches["parse_file"], patches["chunk_elements"], patches["sha256_file"]:
+    with _applied(patches):
         summary = run_ingest(cfg, plan, state=state, embedder=embedder, qdrant=qdrant,
                              full=False, dry_run=True)
 
@@ -340,7 +354,7 @@ def test_full_mode_deletes_orphans(fs) -> None:
 
     # First run: index both
     patches = _patches()
-    with patches["classify"], patches["parse_file"], patches["chunk_elements"], patches["sha256_file"]:
+    with _applied(patches):
         run_ingest(cfg, plan, state=state, embedder=embedder, qdrant=qdrant,
                    full=False, dry_run=False)
 
@@ -349,7 +363,7 @@ def test_full_mode_deletes_orphans(fs) -> None:
     qdrant.reset_mock()
 
     patches = _patches()
-    with patches["classify"], patches["parse_file"], patches["chunk_elements"], patches["sha256_file"]:
+    with _applied(patches):
         summary = run_ingest(cfg, plan, state=state, embedder=embedder, qdrant=qdrant,
                              full=True, dry_run=False)
 

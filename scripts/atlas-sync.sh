@@ -37,7 +37,26 @@ BWORK=$(atlas_work_branch)
 GRAPH=$(atlas_graph_text "$BWORK")
 PIN=$(printf '%s\n' "$GRAPH" |
       awk '/^method:/{m=1;next} m&&/^[^ ]/{m=0} m&&/pinned:/{gsub(/[^0-9.]/,"",$2); print $2; exit}')
-REF=${PIN:+v$PIN}
+# Resolve the pin to an IMMUTABLE release tag (method 1.20). Tags never move after
+# release — content that must change takes the next number. A three-part pin (1.20.1)
+# is exact; a two-part pin (1.20) warns and resolves only to its bare vX.Y tag.
+# (A moved tag once left two vaults both honestly pinned 1.16 on different trees, with
+# drift showing green because the NUMBER matched — arc-platform finding, 2026-09-01.)
+# The pin is honoured LITERALLY (release-convention v0.3, operator ruling 2026-09-07,
+# reversing the 1.20 float): a two-part pin used to resolve to the highest patch, so a
+# seat's method checkout advanced v1.25.0 -> v1.25.4 mid-session with nobody deciding.
+# Now: an exact pin ('1.25.0') checks out exactly v1.25.0; a two-part pin warns and
+# resolves to its bare vX.Y tag only — never upward. Upgrades are deliberate rolls,
+# executed estate-wide on instruction (which also permits canarying one vault first).
+resolve_method_ref() {
+  [ -n "$PIN" ] || return 0
+  case "$PIN" in
+    *.*.*) printf 'v%s' "$PIN" ;;
+    *) echo "atlas-sync: WARN two-part method pin '$PIN' — floating pins are retired (release-convention v0.3); pin an exact version, e.g. '$PIN.0'" >&2
+       printf 'v%s' "$PIN" ;;
+  esac
+}
+REF=$(resolve_method_ref)
 
 if [ ! -d "$ATLAS_METHOD/.git" ]; then
   # shellcheck disable=SC2086
@@ -53,6 +72,7 @@ else
   git -C "$ATLAS_METHOD" pull --ff-only ||
     echo "atlas-sync: WARN method pull failed — continuing on the current checkout" >&2
 fi
+[ -n "$REF" ] && echo "atlas-sync: method pin $PIN -> $REF @ $(git -C "$ATLAS_METHOD" rev-parse --short HEAD 2>/dev/null || echo '?')" >&2
 
 # Branch policy (AAC-method §9): the vault declares the project's branching model in
 # io-graph.yml (branching: work/release). The current branch is invisible ambient state
@@ -91,10 +111,13 @@ fi
 # the method itself). A stale pin must never be silent — a hardcoded pin copied from
 # a runbook or another vault is stale the day after it is written.
 LATEST=$(git ls-remote --tags "$ATLAS_METHOD_REMOTE" 'v*' 2>/dev/null |
-  sed 's|.*refs/tags/||; s|\^{}$||' | grep -E '^v[0-9]+\.[0-9]+$' | sort -V | tail -1)
-if [ -n "$LATEST" ] && [ -n "$REF" ] && [ "$LATEST" != "$REF" ]; then
-  if [ "$(printf '%s\n%s\n' "$REF" "$LATEST" | sort -V | tail -1)" = "$LATEST" ]; then
-    echo "atlas-sync: METHOD DRIFT — vault pins ${REF#v}, latest release is ${LATEST#v}. Re-pin deliberately (see the AAC-method changelog), never silently." >&2
+  sed 's|.*refs/tags/||; s|\^{}$||' | grep -E '^v[0-9]+\.[0-9]+(\.[0-9]+)?$' | sort -V | tail -1)
+_mm() { printf '%s' "${1#v}" | cut -d. -f1,2; }
+if [ -n "$LATEST" ] && [ -n "$REF" ] && [ "$(_mm "$LATEST")" != "$(_mm "$REF")" ]; then
+  if [ "$(printf '%s\n%s\n' "$(_mm "$REF")" "$(_mm "$LATEST")" | sort -V | tail -1)" = "$(_mm "$LATEST")" ]; then
+    # Awareness only. Adopting a release is a periodic-review or operator-instructed
+    # act — NEVER something a session or a sweep does on its own (AAC-method §9).
+    echo "atlas-sync: NOTE for periodic review — vault pins $PIN ($REF); newer release $LATEST exists. Do not re-pin in a sweep; the operator times releases." >&2
   fi
 fi
 
@@ -102,10 +125,17 @@ fi
 # copies drift (AAC-method §8), so detect it rather than trusting it.
 TPL="$ATLAS_METHOD/templates/component-repo/scripts"
 if [ -d "$TPL" ]; then
-  for f in atlas-common.sh atlas-sync.sh atlas-context.sh atlas-guard-write.sh atlas-guard-publish.sh; do
+  _DRIFTED=0
+  for f in atlas-common.sh atlas-sync.sh atlas-context.sh atlas-guard-write.sh atlas-guard-publish.sh atlas-guard-supervise.sh; do
     [ -f "$TPL/$f" ] || continue
-    [ -f "scripts/$f" ] || { echo "atlas-sync: WARN scripts/$f missing — method ${REF:-default} ships it" >&2; continue; }
+    [ -f "scripts/$f" ] || { echo "atlas-sync: WARN scripts/$f missing — method ${REF:-default} ships it" >&2; _DRIFTED=1; continue; }
     cmp -s "$TPL/$f" "scripts/$f" ||
-      echo "atlas-sync: WARN scripts/$f differs from method ${REF:-default} template — re-copy, or raise a proposal if the change is deliberate" >&2
+      { echo "atlas-sync: WARN scripts/$f differs from method ${REF:-default} template — re-copy, or raise a proposal if the change is deliberate" >&2; _DRIFTED=1; }
   done
+  # The warning carries its own remedy (1.26.2, AgentEco ask): the exact refresh
+  # command, filled in — so no arch seat ever needs to mint a per-release broadcast
+  # (which reliably went stale and then named an OLDER version to install).
+  if [ "$_DRIFTED" = 1 ]; then
+    echo "atlas-sync: refresh with: python3 .atlas-method/tools/atlas_init.py --slug $SLUG --force${ATLAS_LAUNCH_DIR:+ --launch-dir \"$ATLAS_LAUNCH_DIR\"} --vault-remote $ATLAS_VAULT_REMOTE   (then re-run with --verify; commit scripts/)" >&2
+  fi
 fi

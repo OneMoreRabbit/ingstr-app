@@ -5,7 +5,6 @@ import pytest
 from ingstr.config import IngstrConfig, load_config
 from ingstr.exceptions import ConfigError
 
-
 _MINIMAL_YAML = """\
 org: arc
 source:

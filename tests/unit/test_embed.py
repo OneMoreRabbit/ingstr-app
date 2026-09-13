@@ -138,7 +138,9 @@ def test_connection_error_raises() -> None:
 
 def test_malformed_json_raises() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
-        return httpx.Response(200, content=b"not valid json", headers={"content-type": "application/json"})
+        return httpx.Response(
+            200, content=b"not valid json", headers={"content-type": "application/json"}
+        )
 
     with _client(handler) as c, pytest.raises(UpstreamUnavailable, match="failed"):
         c.embed(["hello"])

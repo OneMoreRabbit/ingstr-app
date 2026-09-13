@@ -1,6 +1,6 @@
 import os
 import sys
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Annotated
 
@@ -13,9 +13,9 @@ from .embed import EmbeddingClient
 from .exceptions import ConfigError, PlanError, UpstreamUnavailable
 from .logging_setup import configure_logging
 from .pipeline import RunSummary, run_ingest
-from .plan import load_plan
+from .plan import ResolvedPlan, load_plan
 from .qdrant_io import QdrantWriter
-from .state import StateDB
+from .state import RunRecord, StateDB
 
 app = typer.Typer(
     name="ingstr",
@@ -89,12 +89,16 @@ def ingest(
                 )
             except UpstreamUnavailable as e:
                 exit_code = _EXIT_UPSTREAM
-                _finalise_run(state, run_id, started_at=started_at, summary=None, exit_code=exit_code)
+                _finalise_run(
+                    state, run_id, started_at=started_at, summary=None, exit_code=exit_code
+                )
                 typer.echo(f"upstream unavailable: {e}", err=True)
                 raise typer.Exit(code=_EXIT_UPSTREAM) from e
             except Exception as e:
                 exit_code = _EXIT_FATAL
-                _finalise_run(state, run_id, started_at=started_at, summary=None, exit_code=exit_code)
+                _finalise_run(
+                    state, run_id, started_at=started_at, summary=None, exit_code=exit_code
+                )
                 log.exception("run_aborted_unexpected")
                 typer.echo(f"fatal: {e}", err=True)
                 raise typer.Exit(code=_EXIT_FATAL) from e
@@ -230,7 +234,7 @@ def _load_or_exit(config_path: Path) -> IngstrConfig:
         raise typer.Exit(code=_EXIT_CONFIG) from e
 
 
-def _load_plan_or_exit(cfg: IngstrConfig):
+def _load_plan_or_exit(cfg: IngstrConfig) -> ResolvedPlan:
     try:
         return load_plan(cfg.plan.compiled_plan_path, cfg.plan.group_gid_map_path)
     except PlanError as e:
@@ -269,7 +273,7 @@ def _finalise_run(
     )
 
 
-def _run_summary(run) -> str:
+def _run_summary(run: RunRecord | None) -> str:
     if run is None:
         return "(none)"
     return (
@@ -282,7 +286,7 @@ def _run_summary(run) -> str:
 
 
 def _utc_now_iso() -> str:
-    return datetime.now(timezone.utc).isoformat()
+    return datetime.now(UTC).isoformat()
 
 
 def main() -> None:

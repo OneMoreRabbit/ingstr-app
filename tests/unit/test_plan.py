@@ -3,7 +3,6 @@ import pytest
 from ingstr.exceptions import PlanError
 from ingstr.plan import load_plan
 
-
 _VALID_PLAN = """\
 required_groups:
 - arc_g0_engineering_global

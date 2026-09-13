@@ -54,9 +54,18 @@ dependencies = [
 dev = [
     "pytest>=8.0",
     "pytest-cov>=5.0",
+    # The `fs` fixture used throughout tests/unit/test_pipeline_run.py is
+    # pyfakefs's. It was never declared, so `pytest` collected those tests and
+    # failed them all with "fixture 'fs' not found" — invisible until now only
+    # because the Lint step failed first and CI never reached pytest.
+    "pyfakefs>=5.3",
     "testcontainers[qdrant]>=4.7",
     "ruff>=0.5",
     "mypy>=1.10",
+    # `mypy src` is strict and config.py/plan.py both import yaml; without these
+    # stubs it fails with "Library stubs not installed for yaml". Declared here
+    # rather than left to `mypy --install-types`, which CI does not run.
+    "types-PyYAML>=6.0",
 ]
 
 [project.scripts]
@@ -120,3 +129,13 @@ python_version = "3.11"
 strict = true
 warn_unused_ignores = true
 warn_redundant_casts = true
+
+# numpy reaches us only transitively (unstructured -> spacy -> numpy); nothing in
+# src/ imports it or uses its types. Its shipped stubs use 3.12-only `type`
+# statements, which are a hard syntax error under python_version = "3.11" and
+# abort the whole run ("errors prevented further checking") before any of our
+# own code is checked. Skip following them rather than drop our 3.11 floor.
+[[tool.mypy.overrides]]
+module = ["numpy.*"]
+follow_imports = "skip"
+follow_imports_for_stubs = true

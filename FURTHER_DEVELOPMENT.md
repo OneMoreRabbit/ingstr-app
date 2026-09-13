@@ -18,6 +18,13 @@ handovers.
 
 Items required to drop the `-rc1` suffix and tag a true stable.
 
+> **Status note, 2026-09-13.** `v0.1.0` has now been tagged on operator instruction so the
+> estate has a tagged `main` to install from. **This section was not satisfied — it was set
+> aside.** A1 and A2 below remain open, and the tag does not represent the stable milestone
+> they define. They stay the real checklist for a trustworthy ingstr; the next release that
+> claims stability must actually close them. See the `v0.1.0` entry in
+> [CHANGELOG.md](CHANGELOG.md).
+
 ### A1. Real ingest end-to-end on otter
 
 **What:** `docker compose ... run --rm ingstr ingest` against the per-org

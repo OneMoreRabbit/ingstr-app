@@ -9,17 +9,77 @@ GHCR image: `ghcr.io/jobcpf/ingstr-app:<version>`. Pin via `INGSTR_VERSION` in t
 
 ---
 
-## [Unreleased] — pending tag v0.1.0 (stable)
+## [v0.1.0] — 2026-09-13
 
-Awaiting confirmation that v0.1.0-rc4 ingest run on otter shows `files_errored: 0` (or only
-genuinely-corrupt-document errors). When that lands, this section becomes the v0.1.0 release notes.
+Cut on operator instruction (2026-09-13) so the estate has a tagged `main` to install from —
+until now this repo had **no tag at all**, and the estate installs only from tagged `main`.
+Tag scheme is `vX.Y.Z` estate-wide by the same ruling.
 
-### Open
+> **Read this before pinning.** This tag is *not* the stable milestone the `-rc` series was
+> working toward. It is a **"bring `main` current"** release: `main` had not moved since
+> 2026-09-08. The §A gate below was **not** met — it was consciously set aside to unblock
+> consumers, not satisfied.
 
-- A1: Real ingest end-to-end on otter against arc's live tree (in progress with rc4)
-- A2: Integration test using testcontainers Qdrant (placeholder)
+### Still open — the v0.1.0 stable checklist is NOT met
 
-See [FURTHER_DEVELOPMENT.md §A](FURTHER_DEVELOPMENT.md) for the full v0.1 stable checklist.
+- **A1: real ingest end-to-end on otter — still pending.** No full
+  parse→chunk→embed→upsert run against a live tree has ever been confirmed. The
+  `files_errored: 0` confirmation the `-rc4` notes were waiting on never landed.
+- **A2: integration test with testcontainers Qdrant — still a stub.** It skips, and
+  `tests/fixtures/` holds only a `.gitkeep`.
+
+See [FURTHER_DEVELOPMENT.md §A](FURTHER_DEVELOPMENT.md). Treat this as a pre-stable
+artefact that happens to carry a stable-looking version string.
+
+### Fixed
+
+- **`set_classification_group` could never have worked.** It passed the point filter as
+  `points_selector=`, but `QdrantClient.set_payload` names that parameter `points`
+  (only `delete` takes `points_selector`). The filter therefore landed in `**kwargs`
+  while the required `points` argument went unfilled — a `TypeError` on the **RBAC
+  reclassification path**: full mode, where a file's GID changed but its content hash
+  did not. Found by `mypy`, which had never actually run in CI (see below). It was
+  invisible to the unit suite because that path is exercised only through a `MagicMock`,
+  which accepts any keyword silently; `qdrant_io.py` lines 149–171 were at 0% coverage.
+  This is precisely the gap A2 exists to close.
+
+### Changed — CI is green for the first time
+
+CI ran only on `main` until 2026-08-26, so nothing had ever tested the working branch.
+Adding `dev` to the triggers surfaced a failing **Lint** step, which then masked every
+later step — `mypy` and `pytest` had *never executed in CI at all*. Clearing the lint
+errors revealed two further blockers behind it:
+
+- **ruff: 28 errors → 0.** 13 auto-fixed (`datetime.UTC`, `collections.abc.Iterator`,
+  one unused import, import order); the rest by hand. The eleven 103-character
+  `with patches[...]` lines in `test_pipeline_run.py` became a single `_applied()`
+  context manager — which is what `_patches()`' docstring had always promised.
+- **`pyfakefs` was never declared.** The `fs` fixture used throughout
+  `test_pipeline_run.py` is pyfakefs's; absent from `[dev]`, every test in that file
+  would have failed on an unknown fixture the moment CI reached `pytest`. Now declared.
+- **`mypy src` could not complete.** Missing `types-PyYAML` stubs, plus numpy's shipped
+  stubs using 3.12-only `type` statements — a hard syntax error under
+  `python_version = "3.11"` that aborted the run before any of our own code was checked
+  ("errors prevented further checking"). numpy is transitive-only, so its stubs are now
+  skipped via an override rather than dropping the 3.11 floor. With mypy finally
+  running, it found the `set_payload` bug above.
+
+Net: `ruff` 0, `mypy` 0, **98 passed / 1 skipped** (the A2 integration stub), 92% coverage.
+
+### Also in this release
+
+- Atlas method wiring refreshed 1.14 → 1.27.0, and `ATLAS_MODE="supervised"` declared
+  in `.atlas.conf` per the operator ruling of 2026-09-11.
+- `LICENSE` was relicensed Apache-2.0 → MIT in `e43ee08`, but `pyproject.toml` and
+  `README.md` still declared Apache-2.0. Now consistent.
+
+### Contracts
+
+No re-stamp needed. Under method 1.26.9 a contract's version is its component's release
+`MAJOR.MINOR`; `qdrant-collection-contract` and `ingstr-deploy` are both already at `0.1`,
+which is what `v0.1.0` maps to. **Consumers will see no drift from this release** — contrary
+to the general warning in the release instruction, which applies to components whose
+contract versions had drifted from their release line.
 
 ---
 
