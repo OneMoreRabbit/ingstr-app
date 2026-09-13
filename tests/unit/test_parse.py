@@ -29,18 +29,22 @@ def test_returns_list_even_when_partition_returns_iterator() -> None:
 
 
 def test_partition_failure_wrapped_in_ingstr_error() -> None:
-    with patch("ingstr.parse.partition", side_effect=ValueError("malformed pdf")):
-        with pytest.raises(IngstrError, match="failed to parse"):
-            parse_file(Path("/tmp/bad.pdf"))
+    with (
+        patch("ingstr.parse.partition", side_effect=ValueError("malformed pdf")),
+        pytest.raises(IngstrError, match="failed to parse"),
+    ):
+        parse_file(Path("/tmp/bad.pdf"))
 
 
 def test_wraps_unexpected_exception_types() -> None:
     # unstructured backends throw all sorts (pypdf, lxml, libmagic). The
     # pipeline relies on us catching them all so per-file errors don't abort
     # the whole run.
-    with patch("ingstr.parse.partition", side_effect=RuntimeError("libmagic boom")):
-        with pytest.raises(IngstrError, match="failed to parse"):
-            parse_file(Path("/tmp/file.docx"))
+    with (
+        patch("ingstr.parse.partition", side_effect=RuntimeError("libmagic boom")),
+        pytest.raises(IngstrError, match="failed to parse"),
+    ):
+        parse_file(Path("/tmp/file.docx"))
 
 
 def test_original_exception_preserved_in_chain() -> None:

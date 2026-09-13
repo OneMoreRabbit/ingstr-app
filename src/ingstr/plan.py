@@ -1,5 +1,6 @@
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 import yaml
 
@@ -80,7 +81,7 @@ def _load_group_gid_map(path: Path) -> dict[str, int]:
     return out
 
 
-def _read_yaml(path: Path) -> dict:
+def _read_yaml(path: Path) -> dict[str, Any]:
     if not path.is_file():
         raise PlanError(f"required upstream file missing: {path}")
     try:

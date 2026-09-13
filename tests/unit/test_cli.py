@@ -102,7 +102,9 @@ def test_ingest_missing_api_key_exits_one(tmp_path: Path, monkeypatch: pytest.Mo
 # ── ingest: plan error → upstream (exit 2) ─────────────────────────────────
 
 
-def test_ingest_plan_load_failure_exits_two(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_ingest_plan_load_failure_exits_two(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     cfg = _cfg_file(tmp_path)
     # Break the plan file so load_plan raises PlanError
     plan_path = tmp_path / "plan.yml"

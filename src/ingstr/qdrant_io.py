@@ -153,7 +153,11 @@ class QdrantWriter:
                     "classification_group": new_group,
                     "indexed_at": indexed_at,
                 },
-                points_selector=Filter(
+                # NB: `set_payload` names this `points`, unlike `delete`, which
+                # takes `points_selector`. Passing the wrong one lands the filter
+                # in **kwargs and leaves `points` unfilled — a TypeError at call
+                # time, on the RBAC reclassification path.
+                points=Filter(
                     must=[
                         FieldCondition(
                             key="source_path",
