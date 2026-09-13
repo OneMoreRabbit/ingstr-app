@@ -62,6 +62,10 @@ dev = [
     "testcontainers[qdrant]>=4.7",
     "ruff>=0.5",
     "mypy>=1.10",
+    # `mypy src` is strict and config.py/plan.py both import yaml; without these
+    # stubs it fails with "Library stubs not installed for yaml". Declared here
+    # rather than left to `mypy --install-types`, which CI does not run.
+    "types-PyYAML>=6.0",
 ]
 
 [project.scripts]
