@@ -25,9 +25,26 @@ class ResolvedPlan:
 def load_plan(compiled_plan_path: Path, group_gid_map_path: Path) -> ResolvedPlan:
     """Load both upstream YAMLs, invert the GID map, and cross-validate.
 
-    Raises PlanError if either file is missing/malformed, or if any group in
-    group_gid_map.yml is absent from compiled_plan.yml's required_groups
-    (a stale or inconsistent map is fail-fast — exit code 1).
+    Raises PlanError if either file is missing/malformed, or if the two files
+    disagree about the group set in *either* direction (a stale or inconsistent
+    map is fail-fast — exit code 1).
+
+    The check is deliberately symmetric. `group-gid-map-v0_1` guarantee 1 states
+    the key set is exactly `required_groups` — "no extras, no omissions" — and the
+    contract's regeneration rule says ingstr "cross-validates the map against
+    required_groups at startup and exits 1 on mismatch". Until 2026-09-13 this
+    function only checked one of those directions, so a map *missing* a required
+    group loaded cleanly and every file owned by that group then failed
+    individually as UnclassifiableFile — fail-closed, but reported as many
+    per-file errors rather than the one upstream fault that caused them.
+
+    Note what this still cannot catch: a **GID renumbering** with an unchanged key
+    set (a host rebuild reissuing different numbers for the same names) satisfies
+    both directions and is invisible here. That is the contract's own open
+    question, and it is the same failure shape ADR-0010 §6 records for the export
+    sentinel — a check validating an invariant *adjacent* to the one that matters.
+    Detecting it needs continuity across runs, not a within-run comparison; see
+    ADR-0010 §6 layer 2 for the shape the fix takes.
     """
     required_groups = _load_required_groups(compiled_plan_path)
     name_to_gid = _load_group_gid_map(group_gid_map_path)
@@ -37,6 +54,14 @@ def load_plan(compiled_plan_path: Path, group_gid_map_path: Path) -> ResolvedPla
         raise PlanError(
             f"group_gid_map.yml lists groups absent from compiled_plan.yml's "
             f"required_groups (stale map?): {unknown}"
+        )
+
+    missing = sorted(required_groups - set(name_to_gid))
+    if missing:
+        raise PlanError(
+            f"group_gid_map.yml is missing groups that compiled_plan.yml's "
+            f"required_groups declares (stale map, or export ran before the "
+            f"groups existed?): {missing}"
         )
 
     gid_to_group: dict[int, str] = {}
