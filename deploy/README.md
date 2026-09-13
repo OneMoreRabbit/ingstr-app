@@ -25,15 +25,15 @@ Push the repo to GitHub:
 
 ```bash
 cd /path/to/ingstr-app
-git remote add origin git@github.com:jobcpf/ingstr-app.git
+git remote add origin git@github.com:OneMoreRabbit/ingstr-app.git
 git push -u origin main
 ```
 
-The release workflow (`.github/workflows/release.yml`) is triggered by tags matching `v*`. It uses the built-in `GITHUB_TOKEN` and pushes to `ghcr.io/jobcpf/ingstr-app`. No PAT required.
+The release workflow (`.github/workflows/release.yml`) is triggered by tags matching `v*`. It uses the built-in `GITHUB_TOKEN` and pushes to `ghcr.io/onemorerabbit/ingstr-app`. No PAT required.
 
 **Image visibility.** GHCR images are private by default. Make the package public if you want unauthenticated pulls on otter:
 
-1. After the first successful build, go to https://github.com/users/jobcpf/packages/container/ingstr-app/settings
+1. After the first successful build, go to https://github.com/orgs/OneMoreRabbit/packages/container/ingstr-app/settings
 2. *Danger zone* → *Change visibility* → *Public*
 
 If you keep it private, otter needs to authenticate before pulling — see step 4.
@@ -47,12 +47,12 @@ git tag v0.1.0
 git push --tags
 ```
 
-Watch the run at https://github.com/jobcpf/ingstr-app/actions. On success the image will exist as:
+Watch the run at https://github.com/OneMoreRabbit/ingstr-app/actions. On success the image will exist as:
 
-- `ghcr.io/jobcpf/ingstr-app:v0.1.0`
-- `ghcr.io/jobcpf/ingstr-app:0.1.0`
-- `ghcr.io/jobcpf/ingstr-app:0.1`
-- `ghcr.io/jobcpf/ingstr-app:latest` (only if the tag is on the default branch)
+- `ghcr.io/onemorerabbit/ingstr-app:v0.1.0`
+- `ghcr.io/onemorerabbit/ingstr-app:0.1.0`
+- `ghcr.io/onemorerabbit/ingstr-app:0.1`
+- `ghcr.io/onemorerabbit/ingstr-app:latest` (only if the tag is on the default branch)
 
 ---
 
@@ -84,14 +84,25 @@ The shared registry is host-mounted on otter once at `/mnt/registry/` and bind-m
 
 ## 4. Pull the image (private package only)
 
+> **Prerequisite, measured 2026-09-13 and currently NOT met.**
+> `ghcr.io/onemorerabbit/ingstr-app` returns **HTTP 401 to an anonymous client**, so
+> `docker pull` without credentials fails today. The `v0.1.0` image *was* pushed there
+> successfully by `release.yml` (the run log records the manifest push), so this is a
+> package **visibility** matter, not a missing image — `401` and `absent` look identical
+> from outside. Until the org package is made public, the authenticated flow below is
+> the only one that works. The old `ghcr.io/jobcpf/ingstr-app` is public but holds only
+> pre-release tags (`…-rc4` and earlier) — it has no `v0.1.0` and no `:latest`.
+> Namespace ruling: `agenteco-needs-ghcr-namespace` — published images go to
+> `ghcr.io/onemorerabbit/`, never a personal namespace.
+
 If the GHCR package is public, skip this. Otherwise on otter:
 
 ```bash
 # Generate a classic PAT with `read:packages` scope at
 # https://github.com/settings/tokens, then:
-echo "$GHCR_PAT" | docker login ghcr.io -u jobcpf --password-stdin
+echo "$GHCR_PAT" | docker login ghcr.io -u "$GITHUB_USERNAME" --password-stdin
 
-docker pull ghcr.io/jobcpf/ingstr-app:v0.1.0
+docker pull ghcr.io/onemorerabbit/ingstr-app:v0.1.0
 ```
 
 For unattended pulls, store the PAT under root's `~/.docker/config.json` or a credential helper. Do **not** put it in `secrets.env` — that file is for runtime env vars passed into the container, not docker daemon auth.
@@ -167,7 +178,7 @@ The image tag is supplied via `INGSTR_VERSION` in `secrets.env` — no compose.y
 ```bash
 # On otter:
 ORG=arc
-docker pull ghcr.io/jobcpf/ingstr-app:v0.2.0
+docker pull ghcr.io/onemorerabbit/ingstr-app:v0.2.0
 sudo sed -i 's|^INGSTR_VERSION=.*|INGSTR_VERSION=v0.2.0|' /etc/ingstr/${ORG}/secrets.env
 docker compose --env-file /etc/ingstr/${ORG}/secrets.env run --rm ingstr health
 ```

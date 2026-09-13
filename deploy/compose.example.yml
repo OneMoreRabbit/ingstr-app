@@ -34,7 +34,7 @@
 
 services:
   ingstr:
-    image: ghcr.io/jobcpf/ingstr-app:${INGSTR_VERSION:-latest}
+    image: ghcr.io/onemorerabbit/ingstr-app:${INGSTR_VERSION:-latest}
     networks:
       # Per-org network created by the Qdrant compose stack. Lets Ingstr
       # resolve `qdrant_<org>` via Docker DNS without LAN exposure.

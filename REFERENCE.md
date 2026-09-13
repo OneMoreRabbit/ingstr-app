@@ -27,7 +27,7 @@ To run Ingstr, on a Linux host:
 | | |
 |---|---|
 | Container runtime | Docker with the Compose v2 plugin |
-| Image | `ghcr.io/jobcpf/ingstr-app:<version>` (public image, pinned via `INGSTR_VERSION`) |
+| Image | `ghcr.io/onemorerabbit/ingstr-app:<version>` (public image, pinned via `INGSTR_VERSION`) |
 | Registry NFS | `/mnt/registry/` host-mounted, containing `compiled_plan.yml` and `group_gid_map.yml` (produced upstream by `rbac-compile` and `export_group_gids.yml`) |
 | Org data NFS | An NFS export the host can reach, containing the org's data tree |
 | Per-org Qdrant | A running Qdrant container on a per-org Docker network, with a pre-provisioned collection |
@@ -238,7 +238,7 @@ Errors during a per-file step are recorded in the `state.files.last_error` colum
 Tags follow semver with optional pre-release suffixes (`-alpha`, `-beta`, `-rc1`). The image tag is supplied via `INGSTR_VERSION` in `secrets.env` — no compose edit needed for upgrades:
 
 ```bash
-docker pull ghcr.io/jobcpf/ingstr-app:vX.Y.Z
+docker pull ghcr.io/onemorerabbit/ingstr-app:vX.Y.Z
 sudo sed -i 's|^INGSTR_VERSION=.*|INGSTR_VERSION=vX.Y.Z|' /etc/ingstr/<org>/secrets.env
 docker compose --env-file secrets.env run --rm ingstr health
 ```

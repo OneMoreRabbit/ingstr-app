@@ -72,8 +72,8 @@ dev = [
 ingstr = "ingstr.cli:main"
 
 [project.urls]
-Homepage = "https://github.com/jobcpf/ingstr-app"
-Issues = "https://github.com/jobcpf/ingstr-app/issues"
+Homepage = "https://github.com/OneMoreRabbit/ingstr-app"
+Issues = "https://github.com/OneMoreRabbit/ingstr-app/issues"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/ingstr"]

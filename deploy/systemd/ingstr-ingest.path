@@ -1,6 +1,6 @@
 [Unit]
 Description=Ingstr — trigger ingest when the configured sentinel changes
-Documentation=https://github.com/jobcpf/ingstr-app
+Documentation=https://github.com/OneMoreRabbit/ingstr-app
 
 [Path]
 # The sentinel path is platform-deploy config, NOT an Ingstr contract.

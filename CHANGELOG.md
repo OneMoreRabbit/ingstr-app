@@ -4,7 +4,7 @@ All notable changes to Ingstr. Format follows [Keep a Changelog](https://keepach
 project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html) with pre-release suffixes
 (`-alpha`, `-beta`, `-rc<N>`) for non-stable tags.
 
-GHCR image: `ghcr.io/jobcpf/ingstr-app:<version>`. Pin via `INGSTR_VERSION` in the per-org
+GHCR image: `ghcr.io/onemorerabbit/ingstr-app:<version>`. Pin via `INGSTR_VERSION` in the per-org
 `secrets.env`; `:latest` is intentionally NOT updated for pre-release tags.
 
 ---
@@ -252,7 +252,7 @@ plumbing fixes uncovered when ingest started exercising `unstructured`'s actual 
 ### Added
 
 - **First GHCR image build and publish** via `.github/workflows/release.yml` (tag → GHA →
-  GHCR). Public package on `ghcr.io/jobcpf/ingstr-app`.
+  GHCR). Public package on `ghcr.io/onemorerabbit/ingstr-app`.
 - **Image structure**: multi-stage `Dockerfile` (builder pip-installs into `/opt/venv`;
   runtime is `python:3.12-slim` + `libmagic1` + `poppler-utils` + `util-linux` + `tini` +
   `ca-certificates`). Non-root `ingstr` user.
