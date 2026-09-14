@@ -1,7 +1,8 @@
 from typing import Any
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, create_autospec
 
 import pytest
+from qdrant_client import QdrantClient
 from qdrant_client.http.exceptions import UnexpectedResponse
 from qdrant_client.http.models import Distance, VectorParams
 
@@ -30,6 +31,23 @@ def _collection_info(*, vector_size: int = 4) -> MagicMock:
     info = MagicMock()
     info.config.params.vectors = VectorParams(size=vector_size, distance=Distance.COSINE)
     return info
+
+
+def _autospec_client() -> Any:
+    """A client mock that enforces `QdrantClient`'s real method signatures.
+
+    A bare `MagicMock` accepts **any** keyword, which is why the suite could not
+    see that `set_classification_group` passed its filter as `points_selector=`
+    when `set_payload` names that parameter `points` (only `delete` takes
+    `points_selector`). The call was wrong in a way that raises `TypeError`
+    against the real client, and green against a permissive mock — on the RBAC
+    reclassification path.
+
+    `create_autospec` closes that hole: a wrong keyword fails here the way it
+    would in production. Prefer it over `MagicMock` for anything asserting how we
+    *call* the client, as opposed to how we handle what it returns.
+    """
+    return create_autospec(QdrantClient, instance=True)
 
 
 def _point(idx: int = 0) -> QdrantPoint:
@@ -220,3 +238,84 @@ def test_close_tolerates_client_without_close() -> None:
     client = MagicMock(spec=["get_collection", "upsert", "delete", "get_collections", "count"])
     # No close attribute on this mock; should not raise.
     QdrantWriter(_cfg(), api_key="test", client=client).close()
+
+
+# ── set_classification_group ────────────────────────────────────────────────
+#
+# Previously untested: qdrant_io.py:149-171 sat at 0% coverage while the method
+# contained a call that could never succeed. These use _autospec_client() so the
+# client's real signatures are enforced — see that helper for why.
+
+
+def test_set_classification_group_calls_set_payload_with_a_valid_signature() -> None:
+    """The regression guard for the `points_selector=` / `points=` bug.
+
+    This fails with `TypeError: got an unexpected keyword argument
+    'points_selector'` if the old call is restored, because the autospec mock
+    enforces `QdrantClient.set_payload`'s real parameter names. The same test
+    against a bare `MagicMock` passes either way, which is exactly how the bug
+    survived.
+    """
+    client = _autospec_client()
+    _writer(client).set_classification_group(
+        "/mnt/raid_arc/drive/a.pdf",
+        "arc_g18_any_global",
+        indexed_at="2026-09-13T00:00:00Z",
+    )
+
+    client.set_payload.assert_called_once()
+    call = client.set_payload.call_args
+    assert call.kwargs["collection_name"] == "documents"
+    assert call.kwargs["payload"] == {
+        "classification_group": "arc_g18_any_global",
+        "indexed_at": "2026-09-13T00:00:00Z",
+    }
+    # `points`, not `points_selector` — the distinction the bug turned on.
+    assert "points_selector" not in call.kwargs
+    assert call.kwargs["points"] is not None
+    assert call.kwargs["wait"] is True
+
+
+def test_set_classification_group_filters_on_the_requested_source_path() -> None:
+    """The payload refresh must be scoped to one file.
+
+    An unscoped filter would relabel every point in the collection with one
+    agent's group — a silent, collection-wide RBAC change rather than an error.
+    """
+    client = _autospec_client()
+    _writer(client).set_classification_group(
+        "/mnt/raid_arc/drive/only-this-one.pdf",
+        "arc_g0_engineering_global",
+        indexed_at="2026-09-13T00:00:00Z",
+    )
+
+    sel = client.set_payload.call_args.kwargs["points"]
+    conditions = sel.must
+    assert len(conditions) == 1
+    assert conditions[0].key == "source_path"
+    assert conditions[0].match.value == "/mnt/raid_arc/drive/only-this-one.pdf"
+
+
+def test_set_classification_group_failure_is_wrapped() -> None:
+    client = _autospec_client()
+    client.set_payload.side_effect = ConnectionError("refused")
+    with pytest.raises(UpstreamUnavailable):
+        _writer(client).set_classification_group(
+            "/mnt/raid_arc/drive/a.pdf",
+            "arc_g18_any_global",
+            indexed_at="2026-09-13T00:00:00Z",
+        )
+
+
+def test_delete_still_uses_points_selector_not_points() -> None:
+    """The asymmetry that caused the bug, pinned so nobody "fixes" it.
+
+    `delete` genuinely takes `points_selector`; `set_payload` genuinely takes
+    `points`. Renaming either to match the other reintroduces the fault.
+    """
+    client = _autospec_client()
+    _writer(client).delete_points_by_source_path("/mnt/raid_arc/drive/gone.pdf")
+
+    call = client.delete.call_args
+    assert "points_selector" in call.kwargs
+    assert "points" not in call.kwargs
