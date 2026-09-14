@@ -4,6 +4,7 @@ from typing import Literal
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
+from .availability import DEFAULT_PURGE_THRESHOLD
 from .exceptions import ConfigError
 
 
@@ -13,6 +14,45 @@ class SourceConfig(BaseModel):
     root: Path
     follow_symlinks: bool = False
     exclude_patterns: list[str] = Field(default_factory=list)
+
+
+class AgentSourceConfig(BaseModel):
+    """Where this host's agent export is mounted (ADR-0010 §7).
+
+    Optional as a *section*: a deployment that does not yet read agent surfaces
+    simply omits it. But `root` has **no default**, because ADR-0010 §7 exists
+    precisely because v0.1 left the mount path unnamed and three components each
+    invented one — the constitution §10 failure of inferring at the point of use
+    what should be declared at the point of ownership. A wrong-but-plausible
+    root is worse than a missing one: it resolves to a real place on the wrong
+    machine and succeeds.
+
+    The authoritative roots arrive as data in `compiled-rbac-plan` 0.6. This
+    stays config-driven until then so adopting 0.6 is a source change rather
+    than a behaviour change.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    root: Path
+    purge_threshold: float = Field(default=DEFAULT_PURGE_THRESHOLD, gt=0.0, le=1.0)
+    surfaces: list[str] = Field(default_factory=lambda: ["memory", "sessions", "scratch"])
+
+    @field_validator("surfaces")
+    @classmethod
+    def _configs_is_never_ingested(cls, v: list[str]) -> list[str]:
+        """`configs/` is agent-private and carries no RBAC group (ADR-0010 §1).
+
+        It is not in the export at all, so this cannot normally be reached — but
+        a config naming it would be a request to ingest secrets material, and
+        that is worth refusing loudly rather than silently finding nothing.
+        """
+        if "configs" in v:
+            raise ValueError(
+                "'configs' is never ingested (ADR-0010 §1): it is agent-private, "
+                "carries no RBAC classification group, and is not in the export"
+            )
+        return v
 
 
 class PlanConfig(BaseModel):
@@ -70,6 +110,7 @@ class IngstrConfig(BaseModel):
 
     org: str
     source: SourceConfig
+    agent_source: AgentSourceConfig | None = None
     plan: PlanConfig
     embedding: EmbeddingConfig
     qdrant: QdrantConfig
