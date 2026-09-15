@@ -103,7 +103,15 @@ def ingest(
                 typer.echo(f"fatal: {e}", err=True)
                 raise typer.Exit(code=_EXIT_FATAL) from e
 
-            exit_code = _EXIT_PARTIAL if summary.files_errored > 0 else _EXIT_OK
+            # A refused purge is a partial run: everything ingested stands, the
+            # deletions were withheld. ADR-0010 §6 requires it be non-zero —
+            # exiting 0 here would let a broken mount read as a quiet day, which
+            # is the failure the guard exists to make loud.
+            if summary.purge_refused_reason is not None:
+                typer.echo(summary.purge_refused_reason, err=True)
+                exit_code = _EXIT_PARTIAL
+            else:
+                exit_code = _EXIT_PARTIAL if summary.files_errored > 0 else _EXIT_OK
             _finalise_run(
                 state, run_id, started_at=started_at, summary=summary, exit_code=exit_code
             )
