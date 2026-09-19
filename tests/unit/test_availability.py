@@ -19,12 +19,26 @@ from ingstr.availability import (
     read_export_state,
 )
 
+_UUID = "0f9c2a1e-77b4-4f6d-9d3a-2b1c8e5f0a77"
+
 
 def _export(tmp_path: Path, generation: str | None = "gen-1") -> Path:
+    """Export root whose sentinel carries the PINNED one-line shape."""
+    return _export_raw(
+        tmp_path, None if generation is None else f"generation={generation}\n"
+    )
+
+
+def _export_raw(tmp_path: Path, body: str | None) -> Path:
+    """Export root whose sentinel contains `body` verbatim.
+
+    For the malformed cases: the point of most of them is that a file which is
+    not the pinned shape must yield NO generation rather than a fabricated one.
+    """
     root = tmp_path / "mnt" / "agent-hosts" / "otter"
     root.mkdir(parents=True)
-    if generation is not None:
-        (root / SENTINEL_NAME).write_text(generation)
+    if body is not None:
+        (root / SENTINEL_NAME).write_text(body)
     return root
 
 
@@ -129,7 +143,7 @@ def test_rebuilt_export_is_not_read_as_mass_deletion(tmp_path: Path) -> None:
 
 def test_sentinel_without_generation_refuses_continuity(tmp_path: Path) -> None:
     """An empty sentinel is the pre-v0.3 sentinel, and it cannot discriminate."""
-    state = read_export_state(_export(tmp_path, ""), last_generation="gen-1")
+    state = read_export_state(_export_raw(tmp_path, ""), last_generation="gen-1")
     assert state.availability is Availability.UNAVAILABLE
     assert "no generation" in state.reason
 
@@ -137,23 +151,44 @@ def test_sentinel_without_generation_refuses_continuity(tmp_path: Path) -> None:
 @pytest.mark.parametrize(
     "body,expected",
     [
-        ("gen-1\n", "gen-1"),
-        ("  gen-1  \n\ntrailing junk\n", "gen-1"),
-        ('{"generation": "gen-1"}', "gen-1"),
-        ('{"epoch": 1757000000}', "1757000000"),
-        ('{"uuid": "abc-def"}', "abc-def"),
+        (f"generation={_UUID}\n", _UUID),
+        ("generation=gen-1", "gen-1"),          # no trailing newline
+        ("  generation=gen-1  \n", "gen-1"),    # surrounding whitespace
     ],
 )
-def test_generation_is_read_from_either_shape(tmp_path: Path, body: str, expected: str) -> None:
-    """ansible-platform owns this format; read both shapes rather than guess one."""
-    state = read_export_state(_export(tmp_path, body), last_generation=None)
+def test_pinned_generation_shape_is_read(tmp_path: Path, body: str, expected: str) -> None:
+    """ADR-0010 §6, format PINNED 2026-09-16: one line, `generation=<uuid4>`."""
+    state = read_export_state(_export_raw(tmp_path, body), last_generation=None)
     assert state.generation == expected
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        "gen-1\n",                    # bare token: the OLD accepted shape
+        '{"generation": "gen-1"}',    # JSON: the OTHER old accepted shape
+        '{"epoch": 1757000000}',
+    ],
+)
+def test_pre_pin_shapes_are_no_longer_accepted(tmp_path: Path, body: str) -> None:
+    """The hedge is retired, deliberately and visibly.
+
+    These two shapes were accepted while the format was unpinned, because
+    guessing one would have been the §10 failure. ADR-0010 fixed it on
+    2026-09-16, so they are rejected now rather than left to rot into a second
+    supported shape nobody meant to support. A sentinel still carrying an old
+    shape reads as no-generation — unavailable, skipped with a note — which is
+    the safe direction: it never silently certifies continuity.
+    """
+    state = read_export_state(_export_raw(tmp_path, body), last_generation="gen-1")
+    assert state.generation is None
+    assert state.availability is Availability.UNAVAILABLE
 
 
 @pytest.mark.parametrize("body", ['{"not_a_generation": 1}', "{malformed", "{}", "   "])
 def test_unparseable_sentinel_never_invents_a_generation(tmp_path: Path, body: str) -> None:
     """Fabricating one would silently restore the hole layer 2 exists to close."""
-    state = read_export_state(_export(tmp_path, body), last_generation="gen-1")
+    state = read_export_state(_export_raw(tmp_path, body), last_generation="gen-1")
     assert state.generation is None
     assert state.availability is Availability.UNAVAILABLE
 
@@ -229,7 +264,7 @@ def test_default_threshold_is_documented_as_provisional() -> None:
 
 def test_json_sentinel_that_is_not_an_object_is_rejected(tmp_path: Path) -> None:
     """A JSON array is well-formed JSON and still carries no generation."""
-    state = read_export_state(_export(tmp_path, '["gen-1"]'), last_generation="gen-1")
+    state = read_export_state(_export_raw(tmp_path, '["gen-1"]'), last_generation="gen-1")
     assert state.generation is None
     assert state.availability is Availability.UNAVAILABLE
 
@@ -263,7 +298,7 @@ def test_sentinel_bodies_that_must_not_yield_a_generation(tmp_path: Path, body: 
     Prose is the mirror failure: accepted as a token it would differ from
     whatever came before and report a rebuild on every single run.
     """
-    state = read_export_state(_export(tmp_path, body), last_generation="gen-1")
+    state = read_export_state(_export_raw(tmp_path, body), last_generation="gen-1")
     assert state.generation is None
     assert state.availability is Availability.UNAVAILABLE
 
@@ -278,3 +313,76 @@ def test_vanished_files_with_no_known_state_is_allowed() -> None:
     verdict = assess_purge(known_count=0, vanished_count=5)
     assert verdict.allowed is True
     assert "no prior state" in verdict.reason
+
+
+# ── the deadline (ADR-0010 §6 v0.14) ────────────────────────────────────────
+
+
+def test_a_hanging_probe_is_unavailable_not_a_stalled_run(tmp_path: Path, monkeypatch) -> None:
+    """Under `rw,hard` an unreachable export blocks instead of erroring.
+
+    That is the case the deadline exists for: without it the run stops here with
+    no errno, no verdict and no note — "skip and continue" unreachable exactly
+    when it matters, which is the silent failure this design removes arriving by
+    another door. A real hang needs a real mount, so the blocking read is
+    simulated; the code path under test is the timeout arm.
+    """
+    import time
+
+    def _hang(_sentinel):
+        time.sleep(30)
+        raise AssertionError("should never be reached")
+
+    monkeypatch.setattr("ingstr.availability._read_sentinel", _hang)
+
+    state = read_export_state(_export(tmp_path), last_generation="gen-1", timeout=0.05)
+
+    assert state.availability is Availability.UNAVAILABLE
+    assert state.safe_to_purge is False
+    assert "exceeded" in state.reason
+    assert "unreadable, not empty" in state.reason
+
+
+def test_the_deadline_does_not_delay_a_healthy_probe(tmp_path: Path) -> None:
+    """A guard that cost a timeout per scope on every run would be removed."""
+    import time
+
+    start = time.monotonic()
+    state = read_export_state(_export(tmp_path, "gen-1"), last_generation="gen-1", timeout=5.0)
+    elapsed = time.monotonic() - start
+
+    assert state.availability is Availability.AVAILABLE
+    assert elapsed < 1.0
+
+
+def test_a_timed_out_probe_cannot_block_process_exit() -> None:
+    """The bug this nearly shipped with, pinned.
+
+    Two earlier shapes reached a verdict on time and still left the process
+    unable to exit: `with ThreadPoolExecutor(...)` waits on shutdown, and its
+    threads are non-daemon and joined at interpreter exit. Both made the guard
+    decorative for a one-shot container — the run "skipped and continued" and
+    then hung at the door. Measured, not reasoned: the suite took 30s.
+
+    So assert the two properties separately: the call returns near the deadline,
+    AND the abandoned worker is a daemon so shutdown cannot wait on it.
+    """
+    import threading
+    import time
+
+    from ingstr.availability import _with_deadline
+
+    # Identity, not name: earlier tests in this module leave their own parked
+    # probes behind, and they all share the thread name.
+    before = {id(t) for t in threading.enumerate()}
+    start = time.monotonic()
+    completed, value = _with_deadline(lambda: time.sleep(30), timeout=0.05)
+    elapsed = time.monotonic() - start
+
+    assert completed is False
+    assert value is None
+    assert elapsed < 2.0, "deadline did not return promptly"
+
+    leaked = [t for t in threading.enumerate() if id(t) not in before]
+    assert leaked, "expected the probe thread to still be parked"
+    assert all(t.daemon for t in leaked), "a non-daemon probe would block exit"

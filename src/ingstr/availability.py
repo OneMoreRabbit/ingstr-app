@@ -45,17 +45,33 @@ this estate will ever have had. Do not let a green suite be read as that.
 
 from __future__ import annotations
 
-import json
+import contextlib
 import re
+import threading
+from collections.abc import Callable
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
+from typing import TypeVar
 
 SENTINEL_NAME = ".export-ok"
 
-#: A generation is an opaque identifier — UUID, epoch, hash, tagged string.
-#: Deliberately permissive about *which*, strict about it being a token at all.
-_TOKEN_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:+-]*")
+#: The pinned shape (ADR-0010 §6, format PINNED 2026-09-16): exactly one line,
+#: `generation=<uuid4>`. One shape only — comparison is string equality with no
+#: parsing. The prefix is still *required*: without it any text in the file
+#: would become a "generation" that compares equal to itself next run and
+#: certifies a continuity nobody established.
+_GENERATION_RE = re.compile(r"^generation=(\S+)$")
+
+#: How long to wait on a single filesystem probe before calling it unavailable.
+#:
+#: ADR-0010 §6 (v0.14): under `rw,hard` an unreachable export **blocks** rather
+#: than returning an errno, so "skip and continue" is unreachable exactly when
+#: it matters — the run stops with no note, which is the silent failure this
+#: design exists to remove, arriving by another door. The deadline makes the
+#: outcome correct under both `hard` and `soft`, so ingstr's correctness stops
+#: depending on a deployment flag it cannot see from inside the process.
+DEFAULT_PROBE_TIMEOUT_SECONDS = 10.0
 
 #: Refuse a purge that would remove more than this share of the files we know
 #: about for a scope. Provisional: ansible-platform owes us the mount options
@@ -101,10 +117,85 @@ class ExportState:
         return self.availability is Availability.AVAILABLE
 
 
+_T = TypeVar("_T")
+
+
+def _with_deadline(fn: Callable[[], _T], timeout: float) -> tuple[bool, _T | None]:
+    """Run `fn`, giving up after `timeout` seconds. Returns (completed, value).
+
+    A blocked NFS syscall under `rw,hard` cannot be interrupted from user space,
+    so the worker thread stays parked in the kernel however we wrap it. What we
+    control is whether *this run* reaches a verdict and whether the process can
+    still exit. A **daemon** thread gives both: we stop waiting after `timeout`,
+    and the interpreter will not join it at shutdown.
+
+    `ThreadPoolExecutor` is deliberately not used here, twice over. Its context
+    manager calls `shutdown(wait=True)` on exit, so the deadline would expire
+    and then the `with` block would wait for the very hang it just gave up on —
+    a decorative guard. And since 3.9 its threads are **non-daemon** and joined
+    at interpreter exit, so even avoiding the context manager left the process
+    unable to exit for as long as the mount stayed wedged. Both were measured,
+    not reasoned about: the timeout test took 30s wall-clock instead of 0.05s.
+
+    Deliberately not signal-based either: SIGALRM is main-thread only, which
+    would make this unusable from any caller that is not the main thread.
+    """
+    result: list[_T] = []
+
+    def _runner() -> None:
+        with contextlib.suppress(BaseException):
+            # Any failure here is carried as "did not complete"; the caller's
+            # deadline arm produces the verdict either way.
+            result.append(fn())
+
+    worker = threading.Thread(target=_runner, daemon=True, name="atlas-probe")
+    worker.start()
+    worker.join(timeout)
+    if worker.is_alive() or not result:
+        return False, None
+    return True, result[0]
+
+
+def _read_sentinel(sentinel: Path) -> tuple[str | None, ExportState | None]:
+    """Read one sentinel, mapping every failure to a verdict rather than raising.
+
+    Returns (text, None) on success or (None, verdict) on any failure. Split out
+    so it can run under a deadline: the thread does the blocking I/O and the
+    caller keeps the ability to give up on it.
+    """
+    try:
+        return sentinel.read_text(encoding="utf-8"), None
+    except FileNotFoundError:
+        # The load-bearing case. Covers: not mounted; mounted but broken and
+        # reporting an empty listing; a bare directory created at the mount
+        # point. All three read as "no sentinel", and all three are unavailable.
+        return None, ExportState(
+            Availability.UNAVAILABLE,
+            None,
+            f"no {SENTINEL_NAME} at {sentinel.parent} — treating as unreadable, not empty",
+        )
+    except NotADirectoryError:
+        return None, ExportState(
+            Availability.UNAVAILABLE,
+            None,
+            f"{sentinel.parent} is not a directory — treating as unreadable, not empty",
+        )
+    except OSError as e:
+        # ESTALE, EIO, EACCES, ETIMEDOUT and friends. We deliberately do not
+        # enumerate errnos: any failure to read the sentinel is unavailability,
+        # and an errno we did not anticipate must not fall through to "empty".
+        return None, ExportState(
+            Availability.UNAVAILABLE,
+            None,
+            f"cannot read {sentinel} ({e.__class__.__name__}: {e}) — unreadable, not empty",
+        )
+
+
 def read_export_state(
     export_root: Path,
     *,
     last_generation: str | None,
+    timeout: float = DEFAULT_PROBE_TIMEOUT_SECONDS,
 ) -> ExportState:
     """Layers 1 and 2 for one export root.
 
@@ -115,32 +206,22 @@ def read_export_state(
     """
     sentinel = export_root / SENTINEL_NAME
 
-    try:
-        raw = sentinel.read_text(encoding="utf-8")
-    except FileNotFoundError:
-        # The load-bearing case. Covers: not mounted; mounted but broken and
-        # reporting an empty listing; a bare directory created at the mount
-        # point. All three read as "no sentinel", and all three are unavailable.
+    completed, outcome = _with_deadline(lambda: _read_sentinel(sentinel), timeout)
+    if not completed:
+        # Under `rw,hard` this is what an unreachable export looks like: not an
+        # errno, just silence. Without the deadline the run would stop here with
+        # no note at all.
         return ExportState(
             Availability.UNAVAILABLE,
             None,
-            f"no {SENTINEL_NAME} at {export_root} — treating as unreadable, not empty",
+            f"reading {sentinel} exceeded {timeout:g}s — export unresponsive, "
+            f"treating as unreadable, not empty",
         )
-    except NotADirectoryError:
-        return ExportState(
-            Availability.UNAVAILABLE,
-            None,
-            f"{export_root} is not a directory — treating as unreadable, not empty",
-        )
-    except OSError as e:
-        # ESTALE, EIO, EACCES, ETIMEDOUT and friends. We deliberately do not
-        # enumerate errnos: any failure to read the sentinel is unavailability,
-        # and an errno we did not anticipate must not fall through to "empty".
-        return ExportState(
-            Availability.UNAVAILABLE,
-            None,
-            f"cannot read {sentinel} ({e.__class__.__name__}: {e}) — unreadable, not empty",
-        )
+    raw, error = outcome if outcome is not None else (None, None)
+
+    if error is not None:
+        return error
+    assert raw is not None
 
     generation = _parse_generation(raw)
     if generation is None:
@@ -175,47 +256,23 @@ def read_export_state(
 
 
 def _parse_generation(raw: str) -> str | None:
-    """Accept either a bare token or a JSON object carrying one.
+    """Read the pinned one-line `generation=<uuid4>` shape.
 
-    ansible-platform owns this file's format (ADR-0010 §6 records the generation
-    as *their* property, not ours). Until it is pinned in a contract, read both
-    shapes rather than guess one — but never invent a generation when none is
-    present, because a fabricated one would silently restore the exact hole
-    layer 2 exists to close.
+    Returns the value for string-equality comparison, or None if the file is
+    not that shape. Never invents one: a fabricated generation is worse than
+    none, because it compares equal to itself on the next run and certifies a
+    continuity that was never established.
+
+    Deliberately strict now that the format is pinned. This previously accepted
+    a bare token or JSON, hedging against a format nobody had fixed; ADR-0010
+    fixed it on 2026-09-16, so the hedge is retired rather than left to rot into
+    a second accepted shape nobody meant to support.
     """
-    text = raw.strip()
-    if not text:
-        return None
-
-    # Anything structured goes down the JSON path — note `[` as well as `{`.
-    # Checking only `{` let a JSON array fall through to the bare-token branch
-    # and return the literal `["gen-1"]` AS the generation: a fabricated value,
-    # which is the one outcome this function must never produce.
-    if text[0] in "{[":
-        try:
-            doc = json.loads(text)
-        except json.JSONDecodeError:
-            return None
-        if not isinstance(doc, dict):
-            return None
-        for key in ("generation", "epoch", "uuid", "id"):
-            value = doc.get(key)
-            if isinstance(value, str) and value.strip():
-                return value.strip()
-            if isinstance(value, bool):
-                continue
-            if isinstance(value, int):
-                return str(value)
-        return None
-
-    token = text.splitlines()[0].strip()
-    # A generation is an opaque identifier, not prose. Requiring a conservative
-    # charset means a sentinel holding something unexpected reads as "no
-    # generation" — unavailable — rather than as a generation that happens to be
-    # a sentence, which would compare unequal every run and cry rebuild forever.
-    if not token or not _TOKEN_RE.fullmatch(token):
-        return None
-    return token
+    for line in raw.splitlines():
+        m = _GENERATION_RE.match(line.strip())
+        if m:
+            return m.group(1)
+    return None
 
 
 @dataclass(frozen=True)
