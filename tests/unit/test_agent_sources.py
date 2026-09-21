@@ -11,7 +11,7 @@ from pathlib import Path
 
 import pytest
 
-from ingstr.agent_sources import iter_agent_scopes
+from ingstr.agent_sources import iter_agent_scopes, iter_agent_trees
 
 SURFACES = ["memory", "sessions", "scratch"]
 
@@ -166,3 +166,88 @@ def test_a_file_where_a_directory_belongs_is_not_enumerated(tmp_path: Path) -> N
     result = iter_agent_scopes(root, SURFACES)
     assert result.scopes == []
     assert result.skips == []
+
+
+# ── per-agent sentinel (ADR-0010 §6 v0.14) ──────────────────────────────────
+
+_GEN = "0f9c2a1e-77b4-4f6d-9d3a-2b1c8e5f0a77"
+
+
+def _sentinel(path: Path, generation: str = _GEN) -> None:
+    (path / ".export-ok").write_text(f"generation={generation}\n")
+
+
+def _never_seen(_stem: str) -> str | None:
+    return None
+
+
+def test_agent_with_sentinel_is_a_tree(tmp_path: Path) -> None:
+    root = _tree(tmp_path / "mnt", {"arc": {"a1": ["memory", "scratch"]}})
+    _sentinel(root / "arc" / "a1")
+
+    trees, skips = iter_agent_trees(root, SURFACES, last_generation_for=_never_seen)
+
+    assert [t.stem for t in trees] == ["arc/a1"]
+    assert [s.stem for s in trees[0].scopes] == ["arc/a1/memory", "arc/a1/scratch"]
+    assert trees[0].safe_to_purge is True
+    assert skips == []
+
+
+def test_surfaces_without_a_sentinel_are_skipped_loudly(tmp_path: Path) -> None:
+    """ADR-0010 §6 v0.14 consequence 1 — the silent-missing gap, closed.
+
+    A tree arriving by restore, rsync or a manual fix has no minted sentinel.
+    Ingesting it would be reading a tree we cannot vouch for; ingesting it
+    silently, or skipping it silently, would let an agent sit absent from search
+    with nothing saying why. So: not ingested, not purged, and *noted*.
+    """
+    root = _tree(tmp_path / "mnt", {"arc": {"restored": ["memory"]}})
+    # surfaces present, no sentinel — exactly the restore/rsync case
+
+    trees, skips = iter_agent_trees(root, SURFACES, last_generation_for=_never_seen)
+
+    assert trees == []
+    assert [s.stem for s in skips] == ["arc/restored"]
+    assert "no .export-ok" in skips[0].reason
+
+
+def test_recreated_agent_is_ingestible_but_not_purgeable(tmp_path: Path) -> None:
+    """The continuity gain a root-level generation alone cannot see.
+
+    One agent recreated inside a perfectly healthy export: the root sentinel is
+    unchanged and says nothing. The per-agent generation changes, so its tree is
+    read normally — we want the files — while losing the licence to conclude
+    that anything was deleted.
+    """
+    root = _tree(tmp_path / "mnt", {"arc": {"a1": ["memory"]}})
+    _sentinel(root / "arc" / "a1", "new-generation")
+
+    trees, skips = iter_agent_trees(
+        root, SURFACES, last_generation_for=lambda _stem: "old-generation"
+    )
+
+    assert [t.stem for t in trees] == ["arc/a1"]
+    assert trees[0].scopes, "a new incarnation is still ingested"
+    assert trees[0].safe_to_purge is False
+    assert skips == []
+
+
+def test_one_unvouched_agent_does_not_stop_its_siblings(tmp_path: Path) -> None:
+    root = _tree(tmp_path / "mnt", {"arc": {"good": ["memory"], "restored": ["memory"]}})
+    _sentinel(root / "arc" / "good")
+
+    trees, skips = iter_agent_trees(root, SURFACES, last_generation_for=_never_seen)
+
+    assert [t.stem for t in trees] == ["arc/good"]
+    assert [s.stem for s in skips] == ["arc/restored"]
+
+
+def test_malformed_agent_sentinel_is_skipped_not_trusted(tmp_path: Path) -> None:
+    """A sentinel that is not the pinned shape vouches for nothing."""
+    root = _tree(tmp_path / "mnt", {"arc": {"a1": ["memory"]}})
+    (root / "arc" / "a1" / ".export-ok").write_text("not the pinned shape\n")
+
+    trees, skips = iter_agent_trees(root, SURFACES, last_generation_for=_never_seen)
+
+    assert trees == []
+    assert [s.stem for s in skips] == ["arc/a1"]

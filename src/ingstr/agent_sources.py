@@ -26,8 +26,16 @@ that covered four.
 from __future__ import annotations
 
 import os
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
+
+from .availability import (
+    DEFAULT_PROBE_TIMEOUT_SECONDS,
+    Availability,
+    ExportState,
+    read_export_state,
+)
 
 
 @dataclass(frozen=True)
@@ -137,3 +145,74 @@ def _err(e: OSError) -> str:
     """
     name = getattr(e, "errno", None)
     return f"{e.__class__.__name__}({name}): {e}" if name else f"{e.__class__.__name__}: {e}"
+
+
+@dataclass(frozen=True)
+class AgentTree:
+    """One agent's directory, with the verdict on its own continuity.
+
+    The per-agent sentinel answers *"is this agent's tree the same tree?"*,
+    which the export-root sentinel cannot: one recreated agent inside a healthy
+    export is invisible to a root generation (ADR-0010 §6 v0.14).
+    """
+
+    org: str
+    name: str
+    state: ExportState
+    scopes: list[AgentScope]
+
+    @property
+    def stem(self) -> str:
+        return f"{self.org}/{self.name}"
+
+    @property
+    def safe_to_purge(self) -> bool:
+        """Ingestible is not the same as safe to delete from.
+
+        A new incarnation is read normally — we want its files indexed — but it
+        cannot license concluding that anything was deleted, because its tree
+        legitimately differs from the one we last saw.
+        """
+        return self.state.safe_to_purge
+
+
+def iter_agent_trees(
+    root: Path,
+    surfaces: list[str],
+    *,
+    last_generation_for: Callable[[str], str | None],
+    timeout: float = DEFAULT_PROBE_TIMEOUT_SECONDS,
+) -> tuple[list[AgentTree], list[ScopeSkip]]:
+    """Enumerate agents, consulting each one's own sentinel.
+
+    `last_generation_for` is passed the agent stem (`<org>/<name>`) and returns
+    the generation last seen for it, or None on a first run.
+
+    **An agent with surfaces but no readable sentinel is skipped WITH a note**
+    (ADR-0010 §6 v0.14, consequence 1). It is not ingested and not purged: a
+    tree that arrived by restore, rsync or a manual fix has no minted sentinel,
+    and it must surface as a condition rather than quietly vanish from search.
+    Silence there would be the same silent-missing failure this ADR removes,
+    only inverted — nothing wrongly deleted, just nothing ever indexed.
+    """
+    enumeration = iter_agent_scopes(root, surfaces)
+    skips = list(enumeration.skips)
+
+    by_agent: dict[tuple[str, str], list[AgentScope]] = {}
+    for scope in enumeration.scopes:
+        by_agent.setdefault((scope.org, scope.name), []).append(scope)
+
+    trees: list[AgentTree] = []
+    for (org, name), scopes in by_agent.items():
+        stem = f"{org}/{name}"
+        state = read_export_state(
+            root / org / name,
+            last_generation=last_generation_for(stem),
+            timeout=timeout,
+        )
+        if state.availability is Availability.UNAVAILABLE:
+            skips.append(ScopeSkip(stem, f"{stem}: {state.reason}"))
+            continue
+        trees.append(AgentTree(org=org, name=name, state=state, scopes=scopes))
+
+    return trees, skips
