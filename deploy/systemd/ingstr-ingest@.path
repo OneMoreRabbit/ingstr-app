@@ -11,6 +11,13 @@ Documentation=https://github.com/OneMoreRabbit/ingstr-app
 #
 # Constraint: the path must be host-visible. Org data is mounted only
 # inside the container, so the sentinel cannot live in the data tree.
+#
+# NOT DEPLOYED TODAY. otter runs two timers per org instead —
+# ingstr-ingest-<org>.timer every five minutes and
+# ingstr-ingest-full-<org>.timer nightly at 03:00 (measured 2026-11-12).
+# ADR-0010 §6 makes a sentinel the designed signal, so this unit is the
+# shape that change would take; the two need reconciling when ARC ingest
+# is restored.
 # A typical host-side location is /var/lib/ingstr/triggers/<org>/last_sync,
 # which is what %i resolves to below.
 PathChanged=/var/lib/ingstr/triggers/%i/last_sync

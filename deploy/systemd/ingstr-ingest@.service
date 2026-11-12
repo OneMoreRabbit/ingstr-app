@@ -7,16 +7,26 @@ Wants=network-online.target
 
 [Service]
 Type=oneshot
-# %i is the org: `systemctl start ingstr-ingest@arc`. The org segment is
-# NOT optional. One org = one directory under /etc/ingstr/, because
-# compose.yml binds its own directory to /etc/ingstr inside the container
-# (so config.yml must sit beside it) and the compose project name is what
-# gives each org its own state volume. A unit pointing at /etc/ingstr
-# directly cannot run a second org, and would run the wrong org's compose
-# file if a stack ever existed at that path.
-WorkingDirectory=/etc/ingstr/%i
-EnvironmentFile=/etc/ingstr/%i/secrets.env
-ExecStart=/usr/bin/docker compose -f /etc/ingstr/%i/compose.yml run --rm ingstr ingest
+
+# %i is the org: `systemctl start ingstr-ingest@arc`.
+#
+# The ORG SEGMENT is not optional. One org = one directory holding
+# compose.yml, config.yml and secrets.env together: compose.yml binds its own
+# directory to /etc/ingstr INSIDE the container (so config.yml must sit beside
+# it), and the compose project name — the directory name — is what gives each
+# org its own state volume. A unit pointing at the parent directly cannot run
+# a second org.
+#
+# /etc/ingstr is the CONTAINER path, not a host path. The host parent below is
+# estate-manage's choice, and on otter today it is /home/otter/docker/ingstr/
+# (measured 2026-11-12). Change these two lines to match wherever it actually
+# lives; nothing in ingstr depends on the parent.
+User=otter
+WorkingDirectory=/home/otter/docker/ingstr/%i
+
+# No -f: compose reads compose.yml from WorkingDirectory, which is what keeps
+# the project name per-org. -T because there is no terminal under systemd.
+ExecStart=/usr/bin/docker compose --env-file secrets.env run --rm -T ingstr ingest
 StandardOutput=journal
 StandardError=journal
 

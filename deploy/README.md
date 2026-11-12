@@ -135,10 +135,21 @@ Logs are JSON to stdout, captured by docker / journald.
 ## 6. Wire up systemd triggering
 
 The units are **templates, one instance per org** — `ingstr-ingest@<org>`. The org
-is not optional: each org has its own directory under `/etc/ingstr/`, because
-`compose.yml` binds its own directory into the container (so `config.yml` must sit
-beside it) and the compose project name is what gives each org a separate state
-volume. A unit pointing at `/etc/ingstr` directly cannot run a second org.
+is not optional: each org has its own directory holding `compose.yml`, `config.yml`
+and `secrets.env` together, because `compose.yml` binds its own directory to
+`/etc/ingstr` **inside the container** (so `config.yml` must sit beside it) and the
+compose project name — the directory name — is what gives each org a separate state
+volume. A unit pointing at the parent directly cannot run a second org.
+
+`/etc/ingstr` is the container path, not a host path. On otter the host directory is
+`/home/otter/docker/ingstr/<org>/` (measured 2026-11-12); the example units use that.
+Change `User=` and `WorkingDirectory=` if yours sits elsewhere — nothing in ingstr
+depends on the parent directory.
+
+**What otter actually runs today is two timers per org**, not the `.path` unit:
+`ingstr-ingest-<org>.timer` every five minutes and `ingstr-ingest-full-<org>.timer`
+nightly at 03:00. The `.path` unit below is the sentinel-driven shape ADR-0010 §6
+calls for; the two need reconciling when ARC ingest is restored.
 
 ```bash
 sudo cp deploy/systemd/ingstr-ingest@.{service,path} /etc/systemd/system/
