@@ -1,0 +1,28 @@
+[Unit]
+Description=Ingstr — incremental document ingestion run for org %i
+Documentation=https://github.com/OneMoreRabbit/ingstr-app
+Requires=docker.service
+After=docker.service network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+# %i is the org: `systemctl start ingstr-ingest@arc`. The org segment is
+# NOT optional. One org = one directory under /etc/ingstr/, because
+# compose.yml binds its own directory to /etc/ingstr inside the container
+# (so config.yml must sit beside it) and the compose project name is what
+# gives each org its own state volume. A unit pointing at /etc/ingstr
+# directly cannot run a second org, and would run the wrong org's compose
+# file if a stack ever existed at that path.
+WorkingDirectory=/etc/ingstr/%i
+EnvironmentFile=/etc/ingstr/%i/secrets.env
+ExecStart=/usr/bin/docker compose -f /etc/ingstr/%i/compose.yml run --rm ingstr ingest
+StandardOutput=journal
+StandardError=journal
+
+# Don't pile up overlapping runs. If a previous invocation is still
+# running when the .path unit fires again, the new request is dropped.
+# Use `Restart=on-failure` only if partial-failure exit code 3 should retry.
+
+[Install]
+WantedBy=multi-user.target

@@ -10,7 +10,14 @@
 #
 #   QDRANT_RW_API_KEY      (required)  per-org Qdrant write key
 #   QDRANT_NETWORK         (required)  per-org Docker network name, e.g. "qdrant_arc_net"
-#   INGSTR_VERSION         (optional)  image tag, defaults to "latest"
+#   INGSTR_VERSION         (REQUIRED)  image tag, e.g. "v0.1.0". There is
+#                                      deliberately NO "latest" fallback:
+#                                      the tag decides what code runs, and
+#                                      a plausible default for that is what
+#                                      constitution §11 forbids. `dev` is
+#                                      ahead of the newest tag, so :latest
+#                                      names something no tag describes.
+#                                      An unset value fails the run.
 #   ORG_DATA_NFS_ADDR      (required)  NFS server address, e.g. "10.0.0.10"
 #   ORG_DATA_NFS_DEVICE    (required)  NFS export path, e.g. ":/exports/arc/drive"
 #   ORG_DATA_NFS_OPTIONS   (optional)  mount opts, defaults to "soft,ro,nolock"
@@ -34,7 +41,7 @@
 
 services:
   ingstr:
-    image: ghcr.io/onemorerabbit/ingstr-app:${INGSTR_VERSION:-latest}
+    image: ghcr.io/onemorerabbit/ingstr-app:${INGSTR_VERSION:?INGSTR_VERSION must be set — no :latest fallback, see below}
     networks:
       # Per-org network created by the Qdrant compose stack. Lets Ingstr
       # resolve `qdrant_<org>` via Docker DNS without LAN exposure.

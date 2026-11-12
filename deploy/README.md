@@ -134,12 +134,16 @@ Logs are JSON to stdout, captured by docker / journald.
 
 ## 6. Wire up systemd triggering
 
-Copy the unit files and enable the path watcher:
+The units are **templates, one instance per org** — `ingstr-ingest@<org>`. The org
+is not optional: each org has its own directory under `/etc/ingstr/`, because
+`compose.yml` binds its own directory into the container (so `config.yml` must sit
+beside it) and the compose project name is what gives each org a separate state
+volume. A unit pointing at `/etc/ingstr` directly cannot run a second org.
 
 ```bash
-sudo cp deploy/systemd/ingstr-ingest.{service,path} /etc/systemd/system/
+sudo cp deploy/systemd/ingstr-ingest@.{service,path} /etc/systemd/system/
 sudo systemctl daemon-reload
-sudo systemctl enable --now ingstr-ingest.path
+sudo systemctl enable --now ingstr-ingest@arc.path
 ```
 
 The `.path` unit watches a host-visible sentinel file. Because org data lives only inside the container (NFS mounted by Docker, invisible to the host), the upstream sync should write its sentinel to a host-side path like `/var/lib/ingstr/triggers/<org>/last_sync` rather than into the data tree itself. When that file changes, the `.service` runs `docker compose run ingstr ingest` and exits.
@@ -147,9 +151,9 @@ The `.path` unit watches a host-visible sentinel file. Because org data lives on
 Verify:
 
 ```bash
-systemctl status ingstr-ingest.path
-journalctl -u ingstr-ingest.service -f
-sudo touch /var/lib/ingstr/triggers/last_sync   # manual trigger
+systemctl status ingstr-ingest@arc.path
+journalctl -u ingstr-ingest@arc.service -f
+sudo touch /var/lib/ingstr/triggers/arc/last_sync   # manual trigger
 ```
 
 ---
