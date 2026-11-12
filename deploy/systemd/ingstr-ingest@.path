@@ -1,6 +1,6 @@
 [Unit]
-Description=Ingstr — trigger ingest when the configured sentinel changes
-Documentation=https://github.com/jobcpf/ingstr-app
+Description=Ingstr — trigger ingest for org %i when its sentinel changes
+Documentation=https://github.com/OneMoreRabbit/ingstr-app
 
 [Path]
 # The sentinel path is platform-deploy config, NOT an Ingstr contract.
@@ -11,11 +11,19 @@ Documentation=https://github.com/jobcpf/ingstr-app
 #
 # Constraint: the path must be host-visible. Org data is mounted only
 # inside the container, so the sentinel cannot live in the data tree.
-# A typical host-side location is /var/lib/ingstr/triggers/<org>/last_sync.
-PathChanged=/var/lib/ingstr/triggers/last_sync
+#
+# NOT DEPLOYED TODAY. otter runs two timers per org instead —
+# ingstr-ingest-<org>.timer every five minutes and
+# ingstr-ingest-full-<org>.timer nightly at 03:00 (measured 2026-11-12).
+# ADR-0010 §6 makes a sentinel the designed signal, so this unit is the
+# shape that change would take; the two need reconciling when ARC ingest
+# is restored.
+# A typical host-side location is /var/lib/ingstr/triggers/<org>/last_sync,
+# which is what %i resolves to below.
+PathChanged=/var/lib/ingstr/triggers/%i/last_sync
 
 # Triggers the .service of the same name unless overridden:
-Unit=ingstr-ingest.service
+Unit=ingstr-ingest@%i.service
 
 # Wait briefly so a burst of file changes only triggers one run.
 # (Systemd path units don't have native debouncing; the .service Type=oneshot

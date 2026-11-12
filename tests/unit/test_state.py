@@ -73,3 +73,111 @@ def test_db_persists_across_reopen(tmp_path: Path):
     got = db2.get_file("/mnt/raid/a.pdf")
     assert got is not None
     db2.close()
+
+
+# ── ADR-0010 §6 layer 2: export generation continuity ───────────────────────
+
+
+def test_unknown_export_returns_none_not_a_mismatch(tmp_path: Path) -> None:
+    """A first run has nothing to compare against and must say so.
+
+    Conflating "never seen" with "changed" would make every fresh state DB
+    refuse to purge forever — a safe-sounding default that quietly disables the
+    full-mode cleanup the pipeline exists to do.
+    """
+    db = StateDB(tmp_path / "s.db")
+    assert db.get_export_generation("/mnt/agent-hosts/otter") is None
+    db.close()
+
+
+def test_generation_round_trips(tmp_path: Path) -> None:
+    db = StateDB(tmp_path / "s.db")
+    db.record_export_generation("/mnt/agent-hosts/otter", "gen-1", now_iso="2026-09-14T00:00:00Z")
+    assert db.get_export_generation("/mnt/agent-hosts/otter") == "gen-1"
+    db.close()
+
+
+def test_first_seen_survives_an_unchanged_generation(tmp_path: Path) -> None:
+    """Re-recording the same generation must not reset its age.
+
+    first_seen_at is the evidence of how long this incarnation has been the one
+    we were reading; resetting it every run would erase exactly the fact an
+    operator needs when judging whether a later change was their rebuild.
+    """
+    db = StateDB(tmp_path / "s.db")
+    root = "/mnt/agent-hosts/otter"
+    db.record_export_generation(root, "gen-1", now_iso="2026-09-01T00:00:00Z")
+    db.record_export_generation(root, "gen-1", now_iso="2026-09-14T00:00:00Z")
+
+    with db._cursor() as cur:
+        row = cur.execute(
+            "SELECT first_seen_at, last_seen_at FROM exports WHERE export_root = ?", (root,)
+        ).fetchone()
+    assert row["first_seen_at"] == "2026-09-01T00:00:00Z"
+    assert row["last_seen_at"] == "2026-09-14T00:00:00Z"
+    db.close()
+
+
+def test_changed_generation_resets_first_seen(tmp_path: Path) -> None:
+    """A new incarnation is a new thing; its age starts now."""
+    db = StateDB(tmp_path / "s.db")
+    root = "/mnt/agent-hosts/otter"
+    db.record_export_generation(root, "gen-1", now_iso="2026-09-01T00:00:00Z")
+    db.record_export_generation(root, "gen-2", now_iso="2026-09-14T00:00:00Z")
+
+    with db._cursor() as cur:
+        row = cur.execute(
+            "SELECT generation, first_seen_at FROM exports WHERE export_root = ?", (root,)
+        ).fetchone()
+    assert row["generation"] == "gen-2"
+    assert row["first_seen_at"] == "2026-09-14T00:00:00Z"
+    db.close()
+
+
+def test_exports_table_is_added_to_an_existing_database(tmp_path: Path) -> None:
+    """The schema is CREATE TABLE IF NOT EXISTS, so an old state DB gains it.
+
+    Pins that opening a pre-ADR-0010 database does not need a migration step and
+    does not lose its files — the upgrade path operators will actually take.
+    """
+    path = tmp_path / "s.db"
+    first = StateDB(path)
+    first.upsert_file(_record("/mnt/raid/a.pdf"))
+    first.close()
+
+    second = StateDB(path)
+    assert second.get_file("/mnt/raid/a.pdf") is not None
+    assert second.get_export_generation("/mnt/agent-hosts/otter") is None
+    second.record_export_generation("/mnt/agent-hosts/otter", "g", now_iso="2026-09-14T00:00:00Z")
+    assert second.get_export_generation("/mnt/agent-hosts/otter") == "g"
+    second.close()
+
+
+# ── layer 3 denominator ─────────────────────────────────────────────────────
+
+
+def test_count_files_under_scopes_to_the_prefix(tmp_path: Path) -> None:
+    db = StateDB(tmp_path / "s.db")
+    for p in ("/mnt/a/one.pdf", "/mnt/a/two.pdf", "/mnt/b/three.pdf"):
+        db.upsert_file(_record(p))
+
+    assert db.count_files_under("/mnt/a/") == 2
+    assert db.count_files_under("/mnt/b/") == 1
+    assert db.count_files_under("/mnt/") == 3
+    db.close()
+
+
+def test_underscores_in_a_path_are_not_wildcards(tmp_path: Path) -> None:
+    """`_` matches any character in LIKE, and agent names are full of them.
+
+    Unescaped, `agent_arc_research_mz` would also match `agentXarcYresearchZmz`
+    and, more realistically, sibling agents sharing the pattern — inflating the
+    denominator layer 3 divides by and making an implausible purge look
+    plausible. This is the guard that keeps the blast-radius check honest.
+    """
+    db = StateDB(tmp_path / "s.db")
+    db.upsert_file(_record("/srv/agents/arc/agent_one/memory/a.pdf"))
+    db.upsert_file(_record("/srv/agents/arc/agentXone/memory/b.pdf"))
+
+    assert db.count_files_under("/srv/agents/arc/agent_one/") == 1
+    db.close()

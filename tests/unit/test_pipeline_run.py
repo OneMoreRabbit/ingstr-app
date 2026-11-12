@@ -395,3 +395,101 @@ def test_empty_chunks_recorded_as_per_file_error(fs) -> None:
     assert summary.files_errored == 1
     rec = state.get_file(str(a.resolve()))
     assert rec is not None and rec.last_error is not None
+
+
+# ── ADR-0010 §6 layer 3: the purge blast-radius guard ───────────────────────
+
+
+def test_mass_orphan_purge_is_refused(fs) -> None:
+    """The guard, on the path it exists to protect.
+
+    Orphan deletion is driven by *absence of evidence* — a file not seen this
+    run — and absence is exactly what a broken mount produces. From inside
+    run_ingest the two are indistinguishable, so the guard does not try to tell
+    them apart: it refuses when the SCALE is implausible, which needs no
+    knowledge of why the files are missing.
+    """
+    cfg, plan, state, root = fs
+    written = [_write(root / f"f{i}.pdf") for i in range(4)]
+    embedder = _mock_embedder()
+    qdrant = _mock_qdrant()
+
+    patches = _patches()
+    with _applied(patches):
+        run_ingest(cfg, plan, state=state, embedder=embedder, qdrant=qdrant,
+                   full=False, dry_run=False)
+    assert len(state.all_paths()) == 4
+
+    # The whole source disappears — a mount failure, or a genuine mass delete.
+    for f in written:
+        f.unlink()
+    qdrant.reset_mock()
+
+    patches = _patches()
+    with _applied(patches):
+        summary = run_ingest(cfg, plan, state=state, embedder=embedder, qdrant=qdrant,
+                             full=True, dry_run=False)
+
+    assert summary.purge_refused_reason is not None
+    assert "REFUSING to purge" in summary.purge_refused_reason
+    assert summary.files_deleted == 0
+    # Nothing deleted anywhere: not from Qdrant, not from state.
+    qdrant.delete_points_by_source_path.assert_not_called()
+    assert len(state.all_paths()) == 4
+
+
+def test_orphan_deletion_at_exactly_the_threshold_is_allowed(fs) -> None:
+    """Pins the boundary the older orphan test sits on.
+
+    `test_full_mode_deletes_orphans` deletes 1 of 2 known files — exactly 50%,
+    the default threshold — and passes because the comparison is strictly
+    greater-than. That coupling is easy to miss, so it is asserted here by name
+    rather than left implicit in a test about something else.
+    """
+    cfg, plan, state, root = fs
+    a = _write(root / "a.pdf")
+    b = _write(root / "b.pdf")
+    embedder = _mock_embedder()
+    qdrant = _mock_qdrant()
+
+    patches = _patches()
+    with _applied(patches):
+        run_ingest(cfg, plan, state=state, embedder=embedder, qdrant=qdrant,
+                   full=False, dry_run=False)
+
+    b.unlink()
+    patches = _patches()
+    with _applied(patches):
+        summary = run_ingest(cfg, plan, state=state, embedder=embedder, qdrant=qdrant,
+                             full=True, dry_run=False)
+
+    assert summary.purge_refused_reason is None
+    assert summary.files_deleted == 1
+    assert str(a.resolve()) in state.all_paths()
+
+
+def test_dry_run_never_reaches_the_guard(fs) -> None:
+    """A dry run deletes nothing, so there is nothing to refuse.
+
+    Worth pinning: if the guard ever moved above the `not dry_run` check, a dry
+    run would start reporting refusals for deletions it was never going to make.
+    """
+    cfg, plan, state, root = fs
+    written = [_write(root / f"f{i}.pdf") for i in range(4)]
+    embedder = _mock_embedder()
+    qdrant = _mock_qdrant()
+
+    patches = _patches()
+    with _applied(patches):
+        run_ingest(cfg, plan, state=state, embedder=embedder, qdrant=qdrant,
+                   full=False, dry_run=False)
+    for f in written:
+        f.unlink()
+
+    patches = _patches()
+    with _applied(patches):
+        summary = run_ingest(cfg, plan, state=state, embedder=embedder, qdrant=qdrant,
+                             full=True, dry_run=True)
+
+    assert summary.purge_refused_reason is None
+    assert summary.files_deleted == 0

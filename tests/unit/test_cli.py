@@ -13,6 +13,7 @@ from typer.testing import CliRunner
 
 from ingstr import __version__
 from ingstr.cli import app
+from ingstr.pipeline import RunSummary
 
 runner = CliRunner()
 
@@ -188,3 +189,27 @@ def test_stats_handles_qdrant_unreachable(tmp_path: Path, monkeypatch: pytest.Mo
     assert result.exit_code == 0
     assert "files known:" in result.stdout
     assert "qdrant unreachable" in result.stdout
+
+
+def test_ingest_exits_non_zero_when_a_purge_is_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """ADR-0010 §6: refuse, report, exit non-zero.
+
+    Exiting 0 would let a broken mount read as a quiet day — the guard would
+    have done its job and nobody would know, which is the same silent-success
+    shape the guard exists to break.
+    """
+    cfg = _cfg_file(tmp_path)
+    monkeypatch.setenv("QDRANT_RW_API_KEY", "x")
+    refused = RunSummary(purge_refused_reason="REFUSING to purge: 9 of 10 known files")
+
+    with patch("ingstr.cli.EmbeddingClient") as Embed, \
+         patch("ingstr.cli.QdrantWriter") as Qdrant, \
+         patch("ingstr.cli.run_ingest", return_value=refused):
+        Qdrant.return_value.__enter__.return_value.verify_collection.return_value = None
+        Embed.return_value.__enter__.return_value.embed.return_value = []
+        result = runner.invoke(app, ["ingest", "--config", str(cfg), "--full"])
+
+    assert result.exit_code == 3
+    assert "REFUSING to purge" in result.stderr

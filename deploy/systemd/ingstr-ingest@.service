@@ -1,0 +1,38 @@
+[Unit]
+Description=Ingstr — incremental document ingestion run for org %i
+Documentation=https://github.com/OneMoreRabbit/ingstr-app
+Requires=docker.service
+After=docker.service network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+
+# %i is the org: `systemctl start ingstr-ingest@arc`.
+#
+# The ORG SEGMENT is not optional. One org = one directory holding
+# compose.yml, config.yml and secrets.env together: compose.yml binds its own
+# directory to /etc/ingstr INSIDE the container (so config.yml must sit beside
+# it), and the compose project name — the directory name — is what gives each
+# org its own state volume. A unit pointing at the parent directly cannot run
+# a second org.
+#
+# /etc/ingstr is the CONTAINER path, not a host path. The host parent below is
+# estate-manage's choice, and on otter today it is /home/otter/docker/ingstr/
+# (measured 2026-11-12). Change these two lines to match wherever it actually
+# lives; nothing in ingstr depends on the parent.
+User=otter
+WorkingDirectory=/home/otter/docker/ingstr/%i
+
+# No -f: compose reads compose.yml from WorkingDirectory, which is what keeps
+# the project name per-org. -T because there is no terminal under systemd.
+ExecStart=/usr/bin/docker compose --env-file secrets.env run --rm -T ingstr ingest
+StandardOutput=journal
+StandardError=journal
+
+# Don't pile up overlapping runs. If a previous invocation is still
+# running when the .path unit fires again, the new request is dropped.
+# Use `Restart=on-failure` only if partial-failure exit code 3 should retry.
+
+[Install]
+WantedBy=multi-user.target

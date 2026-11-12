@@ -12,7 +12,7 @@ set -e
 
 PY=$(command -v python3 || command -v python)
 
-P=$("$PY" -c '
+_PL=$("$PY" -c '
 import json, sys
 try:
     d = json.load(sys.stdin)
@@ -21,7 +21,13 @@ except Exception:
     raise SystemExit
 ti = d.get("tool_input") or {}
 print(ti.get("file_path") or ti.get("notebook_path") or "")
+body = (ti.get("content") or ti.get("new_string") or "").replace("\r", "")
+import re
+m = re.search(r"^(?:to|addressed-to|addressed_to):\s*(.+)$", body, re.M)
+print(m.group(1).strip() if m else "")
 ')
+P=$(printf '%s\n' "$_PL" | sed -n 1p)
+TO=$(printf '%s\n' "$_PL" | sed -n 2p)
 
 # A guard that cannot parse its input denies, never allows (AAC-method §9).
 if [ "$P" = "__ATLAS_PARSE_ERROR__" ]; then
@@ -43,19 +49,52 @@ P=$(printf '%s' "$P" | tr '\\' '/')
 V=$(printf '%s' "$ATLAS_VAULT" | tr '\\' '/')
 R=$(printf '%s' "$ATLAS_REPO_ROOT" | tr '\\' '/')
 
-# Only police writes belonging to THIS repo. A seat that launches in the clone
-# parent registers one guard per repo it holds (decisions/0002); without this,
-# sibling repo A's guard would deny a legitimate write in sibling repo B.
-case "$P" in
-  "$R"/*) ;;
-  /*) exit 0 ;;                                   # absolute, outside this repo
-esac
+# Which checkouts are "the vault"? Not only $ATLAS_VAULT (the .atlas clone inside the
+# code repo): a both-hats or arch seat edits the SIBLING checkout in its launch dir
+# (Atlas-<P> beside Nav-<P>, 1.24.3), and a guard that governed one while the seat wrote
+# the other was inert on exactly the writes it exists for — while --verify said PASS
+# (DiscoCat finding, 2026-09-08). Resolve every candidate the arch scripts already know:
+# $ATLAS_VAULT, .atlas-arch.conf, and any launch-dir sibling carrying registry/io-graph.yml.
+VAULTS="$V"
+SLUGS="$SLUG"          # this seat's slugs — own, plus any wired sibling at the launch dir
+LD=$(printf '%s' "${ATLAS_LAUNCH_DIR:-}" | sed "s|^\$HOME|$HOME|" | tr '\\' '/')
+if [ -n "$LD" ] && [ -d "$LD" ]; then
+  if [ -f "$LD/.atlas-arch.conf" ]; then
+    _av=$(sed -n 's/^ATLAS_VAULT="\{0,1\}\([^"]*\)"\{0,1\}$/\1/p' "$LD/.atlas-arch.conf" | tr -d '\r' | head -1)
+    [ -n "$_av" ] && VAULTS="$VAULTS
+$_av"
+  fi
+  for _d in "$LD"/*/; do
+    [ -f "${_d}registry/io-graph.yml" ] && VAULTS="$VAULTS
+${_d%/}"
+    # sibling code repos wired to the SAME vault are members of ONE seat (1.28.3,
+    # arc-platform): the write guard allows the UNION of their slugs, as the briefing
+    # already covers all their components. Two per-repo guards each scoped to one slug
+    # denied each other's outbox, leaving a two-component seat unable to write either.
+    [ -f "${_d}.atlas.conf" ] || continue
+    _sv=$(sed -n 's/^ATLAS_VAULT_REMOTE="\{0,1\}\([^"]*\)"\{0,1\}$/\1/p' "${_d}.atlas.conf" | tr -d '
+' | head -1)
+    _svn=$(printf '%s' "$_sv" | sed 's/\.git$//' | tr 'A-Z' 'a-z')
+    _ovn=$(printf '%s' "$ATLAS_VAULT_REMOTE" | sed 's/\.git$//' | tr 'A-Z' 'a-z')
+    [ "$_svn" = "$_ovn" ] || continue
+    _ss=$(sed -n 's/^\(COMPONENT\|SLUG\)="\{0,1\}\([^"]*\)"\{0,1\}$/\2/p' "${_d}.atlas.conf" | tr -d '
+' | head -1)
+    [ -n "$_ss" ] && SLUGS="$SLUGS
+$_ss"
+  done
+fi
 
-case "$P" in
-  *"/$V/"*) REL=${P#*"/$V/"} ;;
-  "$V"/*)   REL=${P#"$V"/}   ;;
-  *) exit 0 ;;                                    # not a vault write
-esac
+# Find the vault this write lands in (if any). Writes outside every vault — the seat's
+# own code, other repos — are not the guard's business.
+REL=""
+for _vr in $(printf '%s\n' "$VAULTS" | sort -u); do
+  [ -n "$_vr" ] || continue
+  case "$P" in
+    *"/$_vr/"*) REL=${P#*"/$_vr/"}; break ;;
+    "$_vr"/*)   REL=${P#"$_vr"/};   break ;;
+  esac
+done
+[ -n "$REL" ] || exit 0                          # not a vault write
 
 # Both-hats mode (1.24.5, orchestrator brief): a single-seat project's one agent is its
 # vault's architecture AND its component's author. DECLARED, never inferred —
@@ -63,29 +102,161 @@ esac
 # more; an ordinary component seat (ATLAS_ROLE unset or "component") is exactly as
 # constrained as before. Transitional by design: the moment the vault gains a second
 # component, the seat goes back to one hat (see AAC-method §9, the migration).
+# the component this write targets, if any
+_comp=""
+case "$REL" in components/*/*) _comp=${REL#components/}; _comp=${_comp%%/*} ;; esac
+addr_check() {
+  # to:-lookup at authoring (1.30.6, operator): a needs doc whose addressee the LOCAL
+  # io-graph cannot resolve is refused, with the valid list in the message. Local
+  # files only — never the network; the estate audit covers cross-vault drift.
+  # Advisory-hard: OUR parse failure allows (the path-scope guard above stays the
+  # fail-closed one); a confident no-match denies.
+  case "$REL" in components/*/docs/needs/*.md) ;; *) return 0 ;; esac
+  [ -n "$TO" ] || return 0                    # Edit without frontmatter in the diff: CI backstops
+  _rc=0
+  "$PY" - "$V" "$TO" <<'PYEOF2' || _rc=$?
+import re, sys, json
+vault, to = sys.argv[1], sys.argv[2]
+try:
+    g = open(vault + "/registry/io-graph.yml", encoding="utf-8").read()
+except OSError:
+    sys.exit(0)                                # no graph readable: allow, CI decides
+comps, roles, pn = [], [], ""
+_vocab = ("component", "architect", "product", "review", "arch", "test")
+try:
+    # a real YAML parse (1.33.17): the regex below only knows block style, and a
+    # flow-style entry ({component: app, ...}) parsed to nothing - which switched the
+    # address check OFF for that vault. PyYAML ships with every seat (the validator
+    # needs it); the regex stays as the fallback.
+    import yaml
+    _g = yaml.safe_load(g) or {}
+    pn = str(_g.get("project") or "").strip().lower()
+    for _c in _g.get("components") or []:
+        if not isinstance(_c, dict):
+            continue
+        _n = str(_c.get("component") or _c.get("slug") or "").strip().lower()
+        _r = str(_c.get("role") or "component").strip().lower()
+        if _r not in _vocab:
+            _r = "component"
+        if _n:
+            (roles if _r != "component" else comps).append((_n, _r))
+except Exception:
+    comps, roles = [], []
+if not comps and not roles:
+    pn = (re.search(r"^project:\s*([\w.-]+)", g, re.M) or [None, ""])[1].lower()
+    for m in re.finditer(r"^\s*-\s+(?:component|slug):\s*([\w.-]+)(.*?)(?=^\s*-\s|\Z)", g, re.M | re.S):
+        name = m.group(1).lower()
+        r = re.search(r"^\s*role:\s*([\w-]+)", m.group(2), re.M)
+        (roles if (r and r.group(1).lower() != "component") else comps).append(
+            (name, r.group(1).lower() if r else "component"))
+if not comps and not roles:
+    sys.exit(0)      # graph parsed to nothing: OUR limitation (flow-style yaml?),
+                     # never a confident no-match - allow, CI refusal backstops
+ok = set()
+have_dir = False
+# THE address book: the seat-local directory cache (written by the validator on any
+# successful live fetch; operator ruling 1.33.2). Local read only - hooks stay offline.
+try:
+    import os as _os
+    _c = json.load(open(_os.path.expanduser("~/.atlas/directory.json")))
+    for _e in (_c.get("addressable") or []):
+        if isinstance(_e, dict):
+            # contract addresses only (1.34.6) - FQNs and bot names are not; an arch seat
+            # with no component rows (the method seat) contributes its <project>.arch
+            for _cm in _e.get("components") or []:
+                if isinstance(_cm, dict) and _cm.get("address"):
+                    ok.add(str(_cm["address"]).lower())
+            _f = str(_e.get("fqn") or "").lower()
+            if _f.endswith(".arch") and not (_e.get("components") or []) and "." in _f:
+                ok.add(_f.split(".", 1)[1])
+    have_dir = True
+except Exception:
+    pass
+if have_dir:
+    # FULL forms only (operator ruling 2026-09-28): directory + own full forms
+    if pn:
+        ok |= {f"{pn}.component.{n}" for n, r in comps}
+        ok |= {f"{pn}.{r}" for n, r in roles} | {f"{pn}.arch"}
+else:
+    ok |= {"atlas", "method", "arch", "nav"}
+    ok |= {n for n, _ in comps} | {n for n, _ in roles}
+    if pn:
+        ok |= {f"{pn}.component.{n}" for n, r in comps}
+        ok |= {f"{pn}.{r}" for n, r in roles} | {f"{pn}.arch", f"{pn}-arch", pn}
+ext_pj = set()
+if not have_dir:
+    for m in re.finditer(r"provider:\s*([\w.-]+)", g):
+        ok.add(m.group(1).lower())
+    for m in re.finditer(r"(?:Atlas|Nav)-([\w.-]+?)(?:\.git)?\s*$", g, re.M):
+        pj = m.group(1).lower(); ext_pj.add(pj)
+        ok |= {pj, f"{pj}-arch", f"{pj}.arch"}
+toks = [x.strip().lower().strip('[]').strip(chr(39)).strip(chr(34)) for x in re.split(r'[,;]', to) if x.strip().strip('[]')]
+bad = [x for x in toks
+       if x not in ok and not any(x.startswith(p + ".") for p in ext_pj)]
+if not toks or not bad:
+    sys.exit(0)
+valid = ", ".join(sorted(ok - {"arch", "nav"}))
+import json
+print(json.dumps({"hookSpecificOutput": {"hookEventName": "PreToolUse",
+  "permissionDecision": "deny",
+  "permissionDecisionReason": (
+    "Atlas addressing (1.30.6): '" + ", ".join(bad) + "' resolves to nothing in this "
+    "vault's io-graph. Addressable from here: " + valid + ". A new external must be "
+    "declared by your arch seat before you can address it (AAC-method 5).")}}))
+sys.exit(3)
+PYEOF2
+  [ "$_rc" = 3 ] && exit 0 || return 0
+}
+for _s in $(printf '%s\n' "$SLUGS" | sort -u); do
+  if [ -n "$_s" ] && [ "$_comp" = "$_s" ]; then
+    addr_check
+    exit 0                                     # a component of THIS seat: allowed
+  fi
+done
 case "$REL" in
-  components/"$SLUG"/*)     exit 0 ;;
   architecture/proposals/*) exit 0 ;;
   registry/io-graph.yml)    exit 0 ;;
 esac
+# extra outboxes declared for this seat's components (1.34.10; same rule as the CI guard)
+for _s in $(printf '%s\n' "$SLUGS" | sort -u); do
+  "$PY" - "$V/registry/io-graph.yml" "$_s" "$REL" <<'PYOB' && exit 0
+import sys
+try:
+    import yaml
+    g = yaml.safe_load(open(sys.argv[1])) or {}
+except Exception:
+    sys.exit(1)
+for p in ((g.get("outboxes") or {}).get(sys.argv[2]) or []):
+    p = str(p).strip().lstrip("/")
+    if p and ".." not in p and sys.argv[3].startswith(p if p.endswith("/") else p + "/"):
+        sys.exit(0)
+sys.exit(1)
+PYOB
+done
 if [ "${ATLAS_ROLE:-component}" = "both" ]; then
+  # the union is AS ARCH (1.33.12, maths-practise: architecture/* alone blocked
+  # next-steps.md, roadmap.md and meta/ — required every arch session): everything in
+  # the vault except product/**, which belongs to the product seat in every mode.
   case "$REL" in
-    architecture/*) exit 0 ;;
+    product/*) ;;
+    *) exit 0 ;;
   esac
 fi
 
 "$PY" -c '
 import json, sys
-slug, rel = sys.argv[1], sys.argv[2]
+slugs, rel = sys.argv[1], sys.argv[2]
+first = slugs.split(", ")[0]
+comp = "|".join(slugs.split(", ")) if ", " in slugs else slugs
 print(json.dumps({"hookSpecificOutput": {
     "hookEventName": "PreToolUse",
     "permissionDecision": "deny",
     "permissionDecisionReason": (
-        f"Atlas golden rule 2 - {slug} writes only to components/{slug}/**, an additive "
+        f"Atlas golden rule 2 - this seat ({slugs}) writes only to components/{{{comp}}}/**, an additive "
         f"architecture/proposals/NNNN-*.md, or its own edges in registry/io-graph.yml. "
         f"Refused: {rel}. If you need something that lives here, do not widen the write: "
-        f"raise it in components/{slug}/docs/needs/ with a `to:` naming the owner, or open "
+        f"raise it in components/{first}/docs/needs/ with a `to:` naming the owner, or open "
         f"an ADR if it is shared architecture."),
 }}))
-' "$SLUG" "$REL"
+' "$(printf '%s\n' "$SLUGS" | sort -u | grep -v '^$' | tr '\n' ',' | sed 's/,$//;s/,/, /g')" "$REL"
 exit 0

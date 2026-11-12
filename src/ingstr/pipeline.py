@@ -8,6 +8,7 @@ from pathlib import Path
 import pathspec
 import structlog
 
+from .availability import DEFAULT_PURGE_THRESHOLD, assess_purge
 from .chunk import Chunk, chunk_elements
 from .classify import classify
 from .config import IngstrConfig
@@ -34,6 +35,12 @@ class RunSummary:
     files_errored: int = 0
     chunks_written: int = 0
     files_deleted: int = 0
+    #: Set when ADR-0010 §6 layer 3 refused a purge. The run keeps whatever it
+    #: ingested — the refusal is about deletion only — but it must NOT report
+    #: success: a withheld purge means the tree we read may not be the tree that
+    #: exists, and a silent zero exit would let a broken mount look like a
+    #: quiet day.
+    purge_refused_reason: str | None = None
 
 
 @dataclass(frozen=True)
@@ -122,6 +129,35 @@ def run_ingest(
     if full and not dry_run:
         known = state.all_paths()
         orphans = sorted(known - seen)
+
+        # ADR-0010 §6 layer 3. Orphan deletion is the only destructive operation
+        # here and it is driven by *absence of evidence* — a file not being seen
+        # this run. Absence is exactly what a broken mount produces, so the two
+        # are indistinguishable from inside this function. The guard does not
+        # try to tell them apart; it refuses when the scale of the deletion is
+        # implausible, which is the one thing that does not require knowing
+        # which happened.
+        threshold = (
+            cfg.agent_source.purge_threshold
+            if cfg.agent_source is not None
+            else DEFAULT_PURGE_THRESHOLD
+        )
+        verdict = assess_purge(
+            known_count=len(known),
+            vanished_count=len(orphans),
+            threshold=threshold,
+        )
+        if not verdict.allowed:
+            _log.error(
+                "purge_refused",
+                known=len(known),
+                vanished=len(orphans),
+                threshold=threshold,
+                reason=verdict.reason,
+            )
+            summary.purge_refused_reason = verdict.reason
+            return summary
+
         for orphan_path in orphans:
             _log.info("file_orphaned_deleted", source_path=orphan_path)
             qdrant.delete_points_by_source_path(orphan_path)

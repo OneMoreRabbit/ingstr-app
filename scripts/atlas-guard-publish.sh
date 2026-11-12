@@ -28,10 +28,63 @@ if [ -n "$REC" ] && [ -n "$BWORK" ] && [ -n "$ATLAS_VAULT_REMOTE" ]; then
   if [ $((NOW - LAST)) -ge 30 ]; then
     printf '%s' "$NOW" > "$THROTTLE" 2>/dev/null || true
     CUR=$(git ls-remote "$ATLAS_VAULT_REMOTE" "refs/heads/$BWORK" 2>/dev/null | cut -f1 || true)
-    if [ -n "$CUR" ] && [ "$CUR" != "$REC" ]; then
+    # the seat's OWN push is not a foreign move (1.33.12, maths-practise +
+    # orchestrator: every both-hats vault push tripped this gate): quiet when CUR is
+    # already contained in any vault checkout this seat holds.
+    _OWN=0
+    for _wc in "$ATLAS_VAULT" "${ATLAS_LAUNCH_DIR:-}"/*/; do
+      [ -d "$_wc" ] && [ -f "${_wc%/}/registry/io-graph.yml" ] || continue
+      if git -C "${_wc%/}" cat-file -e "$CUR" 2>/dev/null &&          git -C "${_wc%/}" merge-base --is-ancestor "$CUR" HEAD 2>/dev/null; then
+        _OWN=1; break
+      fi
+    done
+    if [ -n "$CUR" ] && [ "$CUR" != "$REC" ] && [ "$_OWN" != 1 ]; then
       echo "Atlas: VAULT UPDATED — the work branch moved to ${CUR%????????????????????????????????} since your briefing was compiled from ${REC%????????????????????????????????}. Before finishing: run \`sh scripts/atlas-context.sh\`, read the fresh briefing (pins, ADRs, contracts or needs may have changed your task), reconcile your in-flight work against it, then finish." >&2
       exit 2
     fi
+  fi
+fi
+
+# Cross-vault needs arrived? (1.27.2) atlas-needs.py --show exits 2 with a one-line
+# message only when ~/.atlas/needs-open.md changed since last shown — the same exit-2
+# pattern as the alignment gate, because an exit-0 print never reaches the model. Two
+# stats, no network; never wakes a seat (it speaks inside a turn already underway).
+# FRONTMATTER PARSE GATE (1.33.3, AgentEco: unparseable frontmatter fails QUIET —
+# the briefing reads the doc as ABSENT, so an ask goes invisible while looking
+# answered-by-silence; three measured hits). LINT tier, no exemption: broken YAML is
+# never correct work. Checks changed .md files in the VAULT checkout before finish.
+PY=${PY:-$(command -v python3 || command -v python)}
+if [ -n "${ATLAS_VAULT:-}" ] && [ -d "$ATLAS_VAULT" ]; then
+  _BAD=$(cd "$ATLAS_VAULT" 2>/dev/null && git status --porcelain -uall 2>/dev/null |     awk '{print $2}' | grep -E '^(components/|needs/|architecture/|troubleshooting/).*\.md$' | while read -r _f; do
+      [ -f "$_f" ] || continue
+      "$PY" -c '
+import sys, re, yaml
+t = open(sys.argv[1], encoding="utf-8", errors="replace").read()
+m = re.match(r"^---\s*\n(.*?)\n---", t, re.S)
+if not m:
+    sys.exit(0)                       # no frontmatter block: not this gates business
+try:
+    yaml.safe_load(m.group(1))
+except yaml.YAMLError as e:
+    ln = getattr(getattr(e, "problem_mark", None), "line", "?")
+    print(f"{sys.argv[1]}: line {ln}")
+' "$_f" 2>/dev/null
+    done)
+  if [ -n "$_BAD" ]; then
+    echo "Atlas PUBLISH GATE: unparseable frontmatter — the briefing would read these documents as ABSENT (an ask goes invisible). Fix before finishing:" >&2
+    printf '%s\n' "$_BAD" >&2
+    exit 2
+  fi
+fi
+if [ -f "$ATLAS_REPO_ROOT/scripts/atlas-needs.py" ]; then
+  PY=$(command -v python3 || command -v python)
+  printf '%s' "$PAYLOAD" | "$PY" "$ATLAS_REPO_ROOT/scripts/atlas-needs.py" --show || exit $?
+elif [ -n "${ATLAS_NEEDS_REGISTER:-}" ]; then
+  # configured to read the estate register but the tool is missing: a capability absent
+  # must not look like one that found nothing (1.28.1). Warn once per session.
+  _nw="${TMPDIR:-/tmp}/atlas-needs-missing.$(printf '%s' "$ATLAS_REPO_ROOT" | cksum | cut -d' ' -f1)"
+  if [ ! -f "$_nw" ]; then : > "$_nw"
+    echo "atlas: ATLAS_NEEDS_REGISTER is set but scripts/atlas-needs.py is missing — re-run atlas_init (1.28.1); you are not seeing cross-vault needs." >&2
   fi
 fi
 

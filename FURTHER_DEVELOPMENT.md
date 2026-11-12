@@ -498,7 +498,7 @@ for completeness because it was an open item earlier.
 
 ### E2. Image visibility on GHCR
 
-**What:** The `jobcpf/ingstr-app` image is currently public.
+**What:** The `onemorerabbit/ingstr-app` image is currently public.
 PLATFORM_HANDOFF §10 notes this — if it goes private, otter needs PAT
 auth (one-time setup, not breaking). No application code change either way.
 

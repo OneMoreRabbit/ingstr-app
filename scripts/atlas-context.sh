@@ -27,19 +27,59 @@ if [ "$LAUNCH" != "$ATLAS_REPO_ROOT" ] && [ -d "$LAUNCH" ]; then
   SEAT_SLUGS=""; SEAT_ROOTS=""
   for d in "$LAUNCH"/*/; do
     [ -f "${d}.atlas.conf" ] || continue
-    _s=$(sed -n 's/^SLUG="\{0,1\}\([^"]*\)"\{0,1\}$/\1/p' "${d}.atlas.conf" | tr -d '\r' | head -1)
+    # COMPONENT first, legacy SLUG second (1.33.11, agent-eco: the guard learned both
+    # keys at 1.30.9, this scan did not - a migrated sibling was silently DROPPED from
+    # the seat briefing, open needs included, while --verify passed).
+    _s=$(sed -n 's/^\(COMPONENT\|SLUG\)="\{0,1\}\([^"]*\)"\{0,1\}$/\2/p' "${d}.atlas.conf" | tr -d '\r' | head -1)
     _v=$(sed -n 's/^ATLAS_VAULT_REMOTE="\{0,1\}\([^"]*\)"\{0,1\}$/\1/p' "${d}.atlas.conf" | tr -d '\r' | head -1)
     [ -n "$_s" ] || continue
-    [ "$_v" = "$ATLAS_VAULT_REMOTE" ] || continue   # this hook serves this vault's members
+    # remotes compare NORMALISED (1.33.11, dprox: ".git" vs bare - accepted everywhere
+    # else, so an exact-string compare silently skipped the sibling)
+    _vn=$(printf '%s' "$_v" | sed 's/\.git$//' | tr 'A-Z' 'a-z')
+    _on=$(printf '%s' "$ATLAS_VAULT_REMOTE" | sed 's/\.git$//' | tr 'A-Z' 'a-z')
+    [ "$_vn" = "$_on" ] || continue   # this hook serves this vault's members
     SEAT_SLUGS="${SEAT_SLUGS:+$SEAT_SLUGS,}$_s"
     SEAT_ROOTS="${SEAT_ROOTS:+$SEAT_ROOTS }${d%/}"
     rm -f "$(atlas_nag_sentinel "${d%/}")"          # new session: re-arm every member's nag
   done
   [ -n "$SEAT_SLUGS" ] || { SEAT_SLUGS="$SLUG"; SEAT_ROOTS="$ATLAS_REPO_ROOT"; }
 fi
+case "$SRC" in compact|resume|clear)
+  if [ -f "${ATLAS_METHOD:-}/templates/reorient.md" ]; then
+    cat "$ATLAS_METHOD/templates/reorient.md"; echo
+  else
+    echo "> REORIENT — session was $SRC. Re-orient from durable state: repos, bridge, needs, contracts. Read, don't recall."
+  fi ;;
+esac
 rm -f "$ATLAS_SENTINEL"   # new session: re-arm the publish guard
 
-sh scripts/atlas-sync.sh >&2
+# sync exit 3 = DECLARED degradation (stale pull, or scripts not at pin) — the
+# briefing must still emit, carrying the warning itself; a drifted seat losing its
+# whole briefing is the worst possible reading of "not adopted" (1.33.11 regression,
+# caught in test: set -e killed the hook on the new exit path).
+_SYNC_RC=0
+sh scripts/atlas-sync.sh >&2 || _SYNC_RC=$?
+if [ "$_SYNC_RC" = 3 ]; then
+  echo "> ⚠ **SYNC DEGRADED** — the method pin was fetched but this seat's scripts or checkout are NOT at the pin (see stderr for the exact files and the refresh command). Finish the refresh before relying on guards."
+  echo
+elif [ "$_SYNC_RC" != 0 ]; then
+  echo "> ⚠ sync failed (exit $_SYNC_RC) — briefing compiled from the current checkout; see stderr."
+  echo
+fi
+
+# Release notes in THIS code repo (1.34.14): one entry per tag, headed "## <tag> — <date>",
+# in the tagging commit. The estate release log reads that heading. No network.
+for _r in $SEAT_ROOTS; do
+  _t=$(git -C "$_r" describe --tags --abbrev=0 2>/dev/null || true)
+  [ -n "$_t" ] || continue
+  if [ ! -f "$_r/release-notes.md" ]; then
+    echo "> ⚠ **release-notes.md missing** in $(basename "$_r") though it is tagged ($_t) — copy .atlas-method/templates/release-notes/release-notes.md to its top level, one entry per tag."
+    echo
+  elif ! grep -qE "^## $_t[[:space:]]+—" "$_r/release-notes.md"; then
+    echo "> ⚠ **release-notes.md in $(basename "$_r") has no entry headed \`## $_t — <date>\`** — write it in the tagging commit; the estate release log reads that heading."
+    echo
+  fi
+done
 
 PY=$(command -v python3 || command -v python)
 "$PY" -c "import yaml" 2>/dev/null ||
@@ -87,6 +127,10 @@ fi
 # newer than the vault's pin during an upgrade window, and an unknown flag exits 2 —
 # a failed briefing for a version-skew reason (caught by --verify's new rung).
 HELP=$("$PY" "$ATLAS_METHOD/tools/atlas_validate.py" --help 2>/dev/null || true)
+# keep the write guard's directory cache fresh (1.33.11, agent-eco: a seat had to
+# build ~/.atlas/directory.json by hand before the guard could resolve anything)
+python3 "$ATLAS_METHOD/tools/atlas_validate.py" --refresh-directory >/dev/null 2>&1 || true
+
 EMIT="$SLUG"
 case "$HELP" in *"SLUG[,SLUG"*) EMIT="$SEAT_SLUGS" ;;      # pinned method understands seats
   *) [ "$SEAT_SLUGS" = "$SLUG" ] || echo "atlas-context: pinned method predates seat briefings — emitting per-slug for $SLUG only" >&2 ;;
@@ -153,6 +197,33 @@ if [ -n "$FULLSHA" ]; then
     [ -d "$_r/.git/info" ] || mkdir -p "$_r/.git/info" 2>/dev/null || continue
     printf '%s\n' "$FULLSHA" > "$_r/.git/info/atlas-compiled-sha" 2>/dev/null || true
   done
+fi
+
+# Cross-vault needs (method 1.27.2): needs addressed to this seat but filed in OTHER
+# vaults are EXTERNAL — the in-vault compile cannot render them. atlas-needs.py --refresh (scheduled by
+# the estate) keeps ~/.atlas/needs-open.md current; carry it in the briefing so a fresh
+# or compacted session sees its whole queue, not just its own vault's slice.
+NEEDS_FILE="${HOME:-~}/.atlas/needs-open.md"
+if [ -s "$NEEDS_FILE" ]; then
+  OUT=$(printf '%s\n\n---\n\n# External needs — addressed to me, filed in other vaults (read in place)\n\n%s' "$OUT" "$(cat "$NEEDS_FILE")")
+fi
+
+# Both hats (1.27.4, DiscoCat finding): a seat that is ALSO the vault's architecture was
+# briefed purely as a component and lost the arch half — review queue, estate picture,
+# next-steps, the bridge — and re-oriented after compaction as a component only. Append
+# the arch half (minus what this briefing already carries) so the union mode has a union
+# briefing. Gated on the pinned validator knowing the flag.
+if [ "${ATLAS_ROLE:-component}" = "both" ] && printf '%s' "$HELP" | grep -q -- '--arch-only'; then
+  ARCH_HALF=$("$PY" "$ATLAS_METHOD/tools/atlas_validate.py" "$SRC" --emit-arch-context --arch-only 2>/dev/null || true)
+  case "$ARCH_HALF" in "# ATLAS-CONTEXT"*) OUT=$(printf '%s\n\n---\n\n%s' "$OUT" "$ARCH_HALF") ;; esac
+fi
+
+# Cross-vault consumers (1.27.4): contracts this seat publishes that OTHER vaults pin —
+# invisible from here otherwise. atlas-needs.py --refresh writes ~/.atlas/consumers.md
+# from the estate edges register (when the estate publishes one); carry it.
+CONS_FILE="${HOME:-~}/.atlas/consumers.md"
+if [ -s "$CONS_FILE" ]; then
+  OUT=$(printf '%s\n\n---\n\n# My contracts consumed in other vaults (read in place)\n\n%s' "$OUT" "$(cat "$CONS_FILE")")
 fi
 
 # Report the size of what we inject. Growth here is a defect in the io-graph,
