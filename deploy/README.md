@@ -12,7 +12,7 @@ One Ingstr deploy = one organisation. Multiple orgs share Ollama and the registr
 | **Qdrant** | Per-org | Per-org container with a per-org write API key (managed by Ansible) |
 | **Registry** (`compiled_plan.yml`, `group_gid_map.yml`) | Shared | NFS-mounted on otter at `/mnt/registry/`, bind-mounted into each container |
 | **Org data** | Per-org | NFS-mounted **inside the container** via a Docker NFS volume — otter's host filesystem never sees the org's data |
-| **Config** (`config.yml`, `compose.yml`, `secrets.env`) | Per-org | Host-side at `/etc/ingstr/<org>/`, deployed by Ansible |
+| **Config** (`config.yml`, `compose.yml`, `secrets.env`) | Per-org | One host directory per org — on otter today `~/docker/ingstr/<org>/`, measured 2026-11-12. `/etc/ingstr` is the path **inside** the container, the far end of the bind |
 | **State DB** | Per-org | Per-org named Docker volume; project-name prefix in compose gives automatic isolation |
 
 The "data NFS-in-container" pattern is the load-bearing decision: by mounting org data only inside the container, otter's host operator never has filesystem access to org documents. Compose handles this natively via a `local` volume with the `nfs` driver — see [compose.example.yml](compose.example.yml).
@@ -58,25 +58,34 @@ Watch the run at https://github.com/OneMoreRabbit/ingstr-app/actions. On success
 
 ## 3. Prepare otter
 
-Install the operator-managed pieces on otter under `/etc/ingstr/<org>/` (one directory per org):
+Install the operator-managed pieces on otter in **one directory per org**. On otter
+today that is `~/docker/ingstr/<org>/`, owned by the `otter` user (measured
+2026-11-12); `/etc/ingstr/` on the host is empty and is **not** where these go — it is
+the path inside the container, the far end of compose's `.:/etc/ingstr:ro` bind.
+
+What ingstr requires is only that the three files sit together in one directory per
+org: `compose.yml` binds its own directory into the container, so `config.yml` must be
+beside it, and the directory name becomes the compose project name, which is what gives
+each org its own state volume. Which parent directory holds them is the estate's choice.
 
 ```bash
 ORG=arc
-sudo mkdir -p /etc/ingstr/${ORG}
-sudo cp config.example.yml         /etc/ingstr/${ORG}/config.yml
-sudo cp deploy/compose.example.yml /etc/ingstr/${ORG}/compose.yml
+INGSTR_DIR=~/docker/ingstr/${ORG}      # the estate's layout on otter today
+mkdir -p ${INGSTR_DIR}
+cp config.example.yml         ${INGSTR_DIR}/config.yml
+cp deploy/compose.example.yml ${INGSTR_DIR}/compose.yml
 
 # Per-org secrets — Qdrant write key + NFS mount details for the org's data share.
-sudo tee /etc/ingstr/${ORG}/secrets.env > /dev/null <<EOF
+tee ${INGSTR_DIR}/secrets.env > /dev/null <<EOF
 QDRANT_RW_API_KEY=...
 ORG_DATA_NFS_ADDR=10.0.0.10
 ORG_DATA_NFS_DEVICE=:/exports/${ORG}/drive
-INGSTR_VERSION=v0.1.0-beta
+INGSTR_VERSION=v0.1.0
 EOF
-sudo chmod 0600 /etc/ingstr/${ORG}/secrets.env
+chmod 0600 ${INGSTR_DIR}/secrets.env
 ```
 
-Edit `/etc/ingstr/${ORG}/config.yml` with the real Qdrant URL and collection name; defaults already match the standard mount points.
+Edit `${INGSTR_DIR}/config.yml` with the real Qdrant URL and collection name; defaults already match the standard mount points.
 
 The shared registry is host-mounted on otter once at `/mnt/registry/` and bind-mounted into every org's container — no per-org config needed there.
 
@@ -84,40 +93,46 @@ The shared registry is host-mounted on otter once at `/mnt/registry/` and bind-m
 
 ## 4. Pull the image
 
-> **Measured 2026-11-12. Read this before planning a deploy: the org package
-> lists tags whose manifests cannot be fetched.**
+> **Measured 2026-11-12. The image is there and `docker pull` works — but a
+> hand-rolled `curl` check will tell you it is missing unless you send the right
+> `Accept` header.**
 >
-> A bare request to GHCR with no token returns `401`. That is the registry's
-> normal first answer, not a private package — ask for a token first:
+> A bare request with no token returns `401`. That is the registry's normal
+> first answer, not a private package: ask for a token first. Then the header
+> decides the answer, because this image is an **OCI** manifest and GHCR will
+> not serve it to a client that has not said it accepts one:
 >
 > ```bash
 > TOKEN=$(curl -s "https://ghcr.io/token?scope=repository:onemorerabbit/ingstr-app:pull" \
 >   | python3 -c 'import sys,json;print(json.load(sys.stdin)["token"])')
-> curl -s -H "Authorization: Bearer $TOKEN" https://ghcr.io/v2/onemorerabbit/ingstr-app/tags/list
-> curl -s -o /dev/null -w '%{http_code}\n' -H "Authorization: Bearer $TOKEN" \
+> curl -s -H "Authorization: Bearer $TOKEN" \
+>   -H "Accept: application/vnd.oci.image.manifest.v1+json" \
 >   https://ghcr.io/v2/onemorerabbit/ingstr-app/manifests/v0.1.0
 > ```
 >
-> With that token, from this seat on 2026-11-12:
+> That returns `200`, `mediaType: application/vnd.oci.image.manifest.v1+json`,
+> ten layers. The same request with `*/*`, with no `Accept`, or with either
+> docker manifest type returns **`404`** — and the body says exactly why:
 >
-> | Repository | `tags/list` | manifest |
-> |---|---|---|
-> | `onemorerabbit/ingstr-app` | `200` — `0.1.0`, `0.1`, `v0.1.0`, `latest` | **`404` for `v0.1.0` and for `latest`**, with any `Accept` header |
-> | `jobcpf/ingstr-app` (the old one, control) | `200` — `…-alpha` to `…-rc4` | `200` for `v0.1.0-rc4` |
+> ```json
+> {"errors":[{"code":"MANIFEST_UNKNOWN","message":"OCI manifest found, but Accept header does not support OCI manifests"}]}
+> ```
 >
-> The control matters: the same method against the old repository returns a
-> manifest, so this is not a broken recipe. **A tag list is not proof that an
-> image can be pulled.** The arch seat measured `200` for the org manifest the
-> same day, so treat this as unsettled and *re-run the two commands above before
-> relying on a pull*, rather than trusting either answer.
+> **A `404` without that header is not a missing image.** `docker pull` sends
+> all four types and is unaffected; only hand-rolled checks see it. If you check
+> this by hand, read the response body — the status code alone is what made an
+> earlier version of this page claim the package was unreachable.
 >
 > The old `ghcr.io/jobcpf/ingstr-app` holds only pre-release tags — `…-rc4` and
-> earlier, no `v0.1.0`. Namespace ruling `agenteco-needs-ghcr-namespace`:
-> published images go to `ghcr.io/onemorerabbit/`, never a personal namespace.
+> earlier, no `v0.1.0`. It answers on any header because those are docker v2
+> manifests, which is why it makes a misleading control. Namespace ruling
+> `agenteco-needs-ghcr-namespace`: published images go to
+> `ghcr.io/onemorerabbit/`, never a personal namespace.
 >
-> **`latest` exists in the org package and must not be used.** The tag that
-> decides what code runs is never left to a default — `compose.example.yml`
-> fails the run if `INGSTR_VERSION` is unset, deliberately. Pin an exact tag.
+> **`latest` exists in the org package and must not be used.** It is the same
+> digest as `v0.1.0` today and carries no promise of staying so. The tag decides
+> what code runs, so it is never left to a default: `compose.example.yml` fails
+> the run if `INGSTR_VERSION` is unset, deliberately. Pin an exact tag.
 
 If an anonymous pull works, skip this. Otherwise on otter:
 
@@ -137,7 +152,7 @@ For unattended pulls, store the PAT under root's `~/.docker/config.json` or a cr
 
 ```bash
 ORG=arc
-cd /etc/ingstr/${ORG}
+cd ~/docker/ingstr/${ORG}      # wherever the org's directory is
 
 # Connectivity to qdrant + ollama + NFS + plan.
 docker compose --env-file secrets.env run --rm ingstr health
@@ -217,12 +232,13 @@ The image tag is supplied via `INGSTR_VERSION` in `secrets.env` — no compose.y
 ```bash
 # On otter:
 ORG=arc
+INGSTR_DIR=~/docker/ingstr/${ORG}
 docker pull ghcr.io/onemorerabbit/ingstr-app:v0.2.0
-sudo sed -i 's|^INGSTR_VERSION=.*|INGSTR_VERSION=v0.2.0|' /etc/ingstr/${ORG}/secrets.env
-docker compose --env-file /etc/ingstr/${ORG}/secrets.env run --rm ingstr health
+sed -i 's|^INGSTR_VERSION=.*|INGSTR_VERSION=v0.2.0|' ${INGSTR_DIR}/secrets.env
+cd ${INGSTR_DIR} && docker compose --env-file secrets.env run --rm -T ingstr health
 ```
 
-Or omit `INGSTR_VERSION` entirely (the compose default is `:latest`) — but explicit version tags make rollbacks trivial.
+`INGSTR_VERSION` has no default and omitting it fails the run. That is deliberate: the tag decides what code runs, so it is declared, never guessed. Pin an exact tag; it also makes rollbacks trivial.
 
 ---
 
