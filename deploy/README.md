@@ -82,20 +82,44 @@ The shared registry is host-mounted on otter once at `/mnt/registry/` and bind-m
 
 ---
 
-## 4. Pull the image (private package only)
+## 4. Pull the image
 
-> **Prerequisite, measured 2026-09-13 and currently NOT met.**
-> `ghcr.io/onemorerabbit/ingstr-app` returns **HTTP 401 to an anonymous client**, so
-> `docker pull` without credentials fails today. The `v0.1.0` image *was* pushed there
-> successfully by `release.yml` (the run log records the manifest push), so this is a
-> package **visibility** matter, not a missing image — `401` and `absent` look identical
-> from outside. Until the org package is made public, the authenticated flow below is
-> the only one that works. The old `ghcr.io/jobcpf/ingstr-app` is public but holds only
-> pre-release tags (`…-rc4` and earlier) — it has no `v0.1.0` and no `:latest`.
-> Namespace ruling: `agenteco-needs-ghcr-namespace` — published images go to
-> `ghcr.io/onemorerabbit/`, never a personal namespace.
+> **Measured 2026-11-12. Read this before planning a deploy: the org package
+> lists tags whose manifests cannot be fetched.**
+>
+> A bare request to GHCR with no token returns `401`. That is the registry's
+> normal first answer, not a private package — ask for a token first:
+>
+> ```bash
+> TOKEN=$(curl -s "https://ghcr.io/token?scope=repository:onemorerabbit/ingstr-app:pull" \
+>   | python3 -c 'import sys,json;print(json.load(sys.stdin)["token"])')
+> curl -s -H "Authorization: Bearer $TOKEN" https://ghcr.io/v2/onemorerabbit/ingstr-app/tags/list
+> curl -s -o /dev/null -w '%{http_code}\n' -H "Authorization: Bearer $TOKEN" \
+>   https://ghcr.io/v2/onemorerabbit/ingstr-app/manifests/v0.1.0
+> ```
+>
+> With that token, from this seat on 2026-11-12:
+>
+> | Repository | `tags/list` | manifest |
+> |---|---|---|
+> | `onemorerabbit/ingstr-app` | `200` — `0.1.0`, `0.1`, `v0.1.0`, `latest` | **`404` for `v0.1.0` and for `latest`**, with any `Accept` header |
+> | `jobcpf/ingstr-app` (the old one, control) | `200` — `…-alpha` to `…-rc4` | `200` for `v0.1.0-rc4` |
+>
+> The control matters: the same method against the old repository returns a
+> manifest, so this is not a broken recipe. **A tag list is not proof that an
+> image can be pulled.** The arch seat measured `200` for the org manifest the
+> same day, so treat this as unsettled and *re-run the two commands above before
+> relying on a pull*, rather than trusting either answer.
+>
+> The old `ghcr.io/jobcpf/ingstr-app` holds only pre-release tags — `…-rc4` and
+> earlier, no `v0.1.0`. Namespace ruling `agenteco-needs-ghcr-namespace`:
+> published images go to `ghcr.io/onemorerabbit/`, never a personal namespace.
+>
+> **`latest` exists in the org package and must not be used.** The tag that
+> decides what code runs is never left to a default — `compose.example.yml`
+> fails the run if `INGSTR_VERSION` is unset, deliberately. Pin an exact tag.
 
-If the GHCR package is public, skip this. Otherwise on otter:
+If an anonymous pull works, skip this. Otherwise on otter:
 
 ```bash
 # Generate a classic PAT with `read:packages` scope at
