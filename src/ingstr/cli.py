@@ -162,6 +162,7 @@ def stats(config: ConfigOption = DEFAULT_CONFIG_PATH, org: OrgOption = None) -> 
         last_success = state.get_last_run(success_only=True)
         last_incremental = state.get_last_run(mode="incremental")
         last_full = state.get_last_run(mode="full")
+        refused = state.last_refused_removal()
     finally:
         state.close()
 
@@ -175,6 +176,19 @@ def stats(config: ConfigOption = DEFAULT_CONFIG_PATH, org: OrgOption = None) -> 
     typer.echo(f"files known:        {files_known}")
     typer.echo(f"files errored:      {files_errored}")
     typer.echo(f"chunks stored:      {chunks_stored}")
+    if refused is not None:
+        # A refused removal is a STATE, not a moment: until it is cleared,
+        # passages of files whose access was taken away can still be found.
+        # Printed here because this is where someone comes to ask whether it
+        # is still true, after the alert and after the journal has rolled.
+        typer.echo(
+            f"REMOVAL REFUSED:    run {refused.run_id} at {refused.finished_at} — "
+            f"{refused.purge_refused_reason}"
+        )
+        typer.echo(
+            "                    until this is cleared, passages of files whose "
+            "access was taken away can still be found"
+        )
     typer.echo(f"last successful:    {_run_summary(last_success)}")
     typer.echo(f"last incremental:   {_run_summary(last_incremental)}")
     typer.echo(f"last full:          {_run_summary(last_full)}")
@@ -322,6 +336,7 @@ def _finalise_run(
         files_errored=summary.files_errored if summary else 0,
         chunks_written=summary.chunks_written if summary else 0,
         exit_code=exit_code,
+        purge_refused_reason=summary.purge_refused_reason if summary else None,
     )
 
 

@@ -12,6 +12,49 @@ Newest first. One entry per release tag, written in the same commit that cuts th
 tag. Plain English: a reader skimming this page should know what changed and
 whether they have to act.
 
+## v0.2.1 — 2026-11-13
+
+**TL;DR:** an unchanged run was taking 6 minutes 24 seconds on otter, five of
+them re-parsing 520 files that had failed and would fail again. A failure is
+now recorded once. Also: one file vanishing mid-run no longer stops the run,
+and a refused removal can be asked about after the fact.
+
+- **A file that failed is not tried again** while its size, its modified time
+  and the ingstr version are all unchanged. `--full` tries every failure
+  again, so the nightly run stays the thorough one.
+- **The version is part of that** on purpose. The common failures are facts
+  about the image, not about the file — "tesseract is not installed" is one —
+  so a record that never expired would mean those files are never retried
+  after the image gains what they needed. An upgrade retries them with nobody
+  remembering to.
+- **A skipped failure still counts as errored**, with its recorded reason, and
+  the exit code stays 3. A run is not healthier for having skipped it.
+- **A file that vanishes or becomes unreadable mid-run is that file's
+  result**, not the run's. Before this, one file deleted between being listed
+  and being hashed raised `FileNotFoundError` out of the loop and ended the
+  run at exit 4, discarding every other file's work.
+- **A refused removal is kept** in the run record and shown by `ingstr stats`.
+  It is a state, not a moment: until it is cleared, passages of files whose
+  access was taken away can still be found — and that question had no answer
+  once the journal had rolled.
+- **Two orgs may not write to one collection.** Same Qdrant with different
+  collections is fine; different Qdrant with the same collection name is
+  fine. Sharing one would not collide, since a passage id carries its org —
+  the points would simply sit together, and the first sign would be one org's
+  passage returned to the other's reader.
+
+**What a timer run no longer notices**, until the nightly `--full`:
+
+- a file that failed, was then changed with its size and modified time
+  preserved, and would now parse;
+- a changed setting that would let a failed file parse — when the page limit
+  or the language list arrive, raising either does not retry failures until
+  the nightly run or the next version.
+
+**Action:** none. An existing state database gains its new columns in place on
+first open; a file that failed under an earlier version has no recorded
+version, so it is tried once more and then recorded properly.
+
 ## v0.2.0 — 2026-11-13
 
 **TL;DR:** one configuration lists every org and a run reads one of them; a

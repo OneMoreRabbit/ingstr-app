@@ -181,3 +181,79 @@ def test_underscores_in_a_path_are_not_wildcards(tmp_path: Path) -> None:
 
     assert db.count_files_under("/srv/agents/arc/agent_one/") == 1
     db.close()
+
+
+# ── v0.2.1 ─────────────────────────────────────────────────────────────────
+
+
+def test_a_database_from_an_earlier_version_gains_the_new_columns(tmp_path):
+    """`CREATE TABLE IF NOT EXISTS` creates a missing table and does NOTHING
+    to an existing one, so a database written by v0.1.x or v0.2.0 keeps its
+    old shape and every query naming a new column fails. ARC's state database
+    is one of those."""
+    import sqlite3
+
+    db = tmp_path / "old.db"
+    conn = sqlite3.connect(db)
+    conn.executescript(
+        """
+        CREATE TABLE files (
+            source_path TEXT PRIMARY KEY, content_hash TEXT NOT NULL,
+            mtime REAL NOT NULL, size_bytes INTEGER NOT NULL,
+            classification_group TEXT NOT NULL, chunk_count INTEGER NOT NULL,
+            last_indexed_at TEXT NOT NULL, last_error TEXT);
+        CREATE TABLE runs (
+            run_id INTEGER PRIMARY KEY AUTOINCREMENT, started_at TEXT NOT NULL,
+            finished_at TEXT, mode TEXT NOT NULL, files_seen INTEGER,
+            files_indexed INTEGER, files_skipped INTEGER, files_errored INTEGER,
+            chunks_written INTEGER, exit_code INTEGER);
+        INSERT INTO files VALUES ('/mnt/data/a.pdf', 'h', 1.0, 2, 'g', 1, 'then', 'broke');
+        """
+    )
+    conn.commit()
+    conn.close()
+
+    state = StateDB(db)
+    try:
+        record = state.get_file("/mnt/data/a.pdf")
+        assert record is not None
+        # The row survives, and the file is retried once because nothing says
+        # which version recorded its failure.
+        assert record.last_error == "broke"
+        assert record.failed_at_version is None
+        assert state.last_refused_removal() is None
+    finally:
+        state.close()
+
+
+def test_a_refused_removal_is_findable_after_the_run(tmp_path):
+    """A refusal is a state, not a moment: until it is cleared, passages of
+    files whose access was taken away can still be found. Before v0.2.1 it
+    existed only in one run's stderr."""
+    state = StateDB(tmp_path / "s.db")
+    try:
+        run_id = state.start_run(mode="full", started_at="t0")
+        state.finish_run(
+            run_id, finished_at="t1", files_seen=1, files_indexed=0,
+            files_skipped=0, files_errored=0, chunks_written=0, exit_code=3,
+            purge_refused_reason="would remove 900 of 1000",
+        )
+        refused = state.last_refused_removal()
+        assert refused is not None
+        assert refused.purge_refused_reason == "would remove 900 of 1000"
+        assert refused.run_id == run_id
+    finally:
+        state.close()
+
+
+def test_a_run_that_removed_normally_is_not_reported_as_refused(tmp_path):
+    state = StateDB(tmp_path / "s.db")
+    try:
+        run_id = state.start_run(mode="full", started_at="t0")
+        state.finish_run(
+            run_id, finished_at="t1", files_seen=1, files_indexed=1,
+            files_skipped=0, files_errored=0, chunks_written=2, exit_code=0,
+        )
+        assert state.last_refused_removal() is None
+    finally:
+        state.close()

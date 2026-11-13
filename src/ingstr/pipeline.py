@@ -8,6 +8,7 @@ from pathlib import Path
 import pathspec
 import structlog
 
+from . import __version__
 from .availability import DEFAULT_PURGE_THRESHOLD, assess_purge
 from .chunk import Chunk, chunk_elements
 from .classify import classify
@@ -53,6 +54,11 @@ class RunSummary:
     #: from files_errored so "this org's folder holds another org's data" is
     #: visible as itself rather than buried in a parse-failure total.
     files_wrong_org: int = 0
+    #: Files that failed before, are unchanged, and were not tried again. They
+    #: are counted in files_errored too: the run is not healthier for having
+    #: skipped them. This number says how much of the error count was carried
+    #: rather than discovered.
+    files_failed_skipped: int = 0
     chunks_written: int = 0
     files_deleted: int = 0
     #: Set when ADR-0010 §6 layer 3 refused a purge. The run keeps whatever it
@@ -69,7 +75,13 @@ class _ProcessOutcome:
     counters without re-deriving from per-step exceptions."""
 
     action: str  # "ingest" | "skip_unchanged" | "payload_refresh" | "dry_run"
+    #             | "skip_failed"
     chunks: int = 0
+    #: Set only for "skip_failed": the error this file recorded when it last
+    #: failed. Carried so the run summary can count it as errored WITH its
+    #: reason — a skipped failure must not make a run look healthier than it
+    #: is, and the exit code stays 3.
+    recorded_error: str | None = None
 
 
 def run_ingest(
@@ -115,6 +127,16 @@ def run_ingest(
                 full=full,
                 dry_run=dry_run,
             )
+        except OSError as e:
+            # The file was listed and is now unreadable or gone — a race with
+            # whatever writes this tree, and ordinary on a live share. Before
+            # v0.2.1 this escaped to the fatal handler and took the whole run
+            # down at exit 4: one file deleted mid-walk discarded every other
+            # file's work. A file that cannot be read is that file's result.
+            _log.warning("file_unreadable", source_path=abs_path, error=str(e))
+            _record_per_file_error(state, path, error=f"could not read: {e}")
+            summary.files_errored += 1
+            continue
         except UnclassifiableFile as e:
             _log.warning(
                 "file_unclassifiable", source_path=abs_path, gid=e.gid
@@ -147,7 +169,17 @@ def run_ingest(
             summary.files_errored += 1
             continue
 
-        if outcome.action == "skip_unchanged":
+        if outcome.action == "skip_failed":
+            # Not re-tried, still broken. It counts as errored, with the
+            # reason it recorded, so the run reports what is true.
+            _log.info(
+                "file_failed_before",
+                source_path=abs_path,
+                error=outcome.recorded_error,
+            )
+            summary.files_errored += 1
+            summary.files_failed_skipped += 1
+        elif outcome.action == "skip_unchanged":
             summary.files_skipped += 1
         elif outcome.action == "payload_refresh":
             summary.files_indexed += 1
@@ -250,14 +282,48 @@ def _process_file(
     abs_path = str(path.resolve())
     rel_path = path.relative_to(cfg.source.root).as_posix()
 
+    existing = state.get_file(abs_path)
+    stat_info = path.stat()
+
+    # 0. A file that failed before, is unchanged, and failed under THIS version
+    #    is not tried again (v0.2.1).
+    #
+    #    Measured on otter: an unchanged run took 6m24s, of which reading and
+    #    hashing every indexed file was 70 seconds. The rest was re-parsing the
+    #    520 files that had failed and would fail again — every five minutes,
+    #    for as long as they sat there.
+    #
+    #    Keyed to the VERSION, not only to the file, because the common
+    #    failures are facts about the image rather than about the file:
+    #    "tesseract is not installed" is one. A record that never expired would
+    #    mean the 213 scanned PDFs are never retried after tesseract is added,
+    #    by anyone, ever. An upgrade retries them with nobody remembering to.
+    #
+    #    `--full` tries everything again regardless, which keeps the nightly
+    #    run the thorough one — the same division as elsewhere.
+    #
+    #    A record from before v0.2.1 has no version, so it is retried once and
+    #    then recorded properly. That is the right answer, not a special case.
+    if (
+        not full
+        and existing is not None
+        and existing.last_error is not None
+        and existing.failed_at_version == __version__
+        and existing.mtime == stat_info.st_mtime
+        and existing.size_bytes == stat_info.st_size
+    ):
+        return _ProcessOutcome(
+            action="skip_failed",
+            chunks=0,
+            recorded_error=existing.last_error,
+        )
+
     # 1. classify (raises UnclassifiableFile)
     group = classify(path, plan, cfg.org)
 
-    # 2. hash + stat
-    stat_info = path.stat()
+    # 2. hash
     content_hash = sha256_file(path)
 
-    existing = state.get_file(abs_path)
     now_iso = _utc_now_iso()
     mtime_iso = (
         datetime.fromtimestamp(stat_info.st_mtime, tz=UTC).isoformat()
@@ -267,6 +333,24 @@ def _process_file(
     # Hash unchanged → skip work, optionally refresh classification on group change
     if existing is not None and existing.content_hash == content_hash:
         if existing.classification_group == group:
+            if existing.last_error is not None:
+                # It failed at some point and is now back to content that was
+                # indexed successfully. The passages are there and correct, so
+                # the recorded failure is stale — clear it rather than count
+                # this file as errored for ever.
+                state.upsert_file(
+                    FileRecord(
+                        source_path=existing.source_path,
+                        content_hash=existing.content_hash,
+                        mtime=stat_info.st_mtime,
+                        size_bytes=stat_info.st_size,
+                        classification_group=existing.classification_group,
+                        chunk_count=existing.chunk_count,
+                        last_indexed_at=existing.last_indexed_at,
+                        last_error=None,
+                        failed_at_version=None,
+                    )
+                )
             return _ProcessOutcome(action="skip_unchanged", chunks=existing.chunk_count)
 
         # GID changed but content didn't. Refresh the payload field on every
@@ -393,28 +477,42 @@ def _record_per_file_error(state: StateDB, path: Path, *, error: str) -> None:
     minimal placeholder so `ingstr stats` can report it as errored."""
     abs_path = str(path.resolve())
     existing = state.get_file(abs_path)
-    if existing is not None:
-        state.upsert_file(
-            FileRecord(
-                source_path=existing.source_path,
-                content_hash=existing.content_hash,
-                mtime=existing.mtime,
-                size_bytes=existing.size_bytes,
-                classification_group=existing.classification_group,
-                chunk_count=existing.chunk_count,
-                last_indexed_at=existing.last_indexed_at,
-                last_error=error,
-            )
-        )
-        return
 
+    # The file AS IT IS NOW, not as it was when it last succeeded. v0.2.1
+    # decides whether to try a failure again by comparing the stored size and
+    # modified time against the file, so they have to describe the version
+    # that failed. Before v0.2.1 this branch kept the old values, which was
+    # how a file that once indexed and then broke was re-parsed on every run
+    # for ever.
     try:
         stat_info = path.stat()
         size = stat_info.st_size
         mtime = stat_info.st_mtime
     except OSError:
+        # Gone between failing and being recorded. Zeroes match no real file,
+        # so it is tried again if it comes back.
         size = 0
         mtime = 0.0
+
+    if existing is not None:
+        # The content hash and the passage count stay as they were: the file
+        # still HAS whatever was indexed from it, and a failure is not a
+        # reason to forget that.
+        state.upsert_file(
+            FileRecord(
+                source_path=existing.source_path,
+                content_hash=existing.content_hash,
+                mtime=mtime,
+                size_bytes=size,
+                classification_group=existing.classification_group,
+                chunk_count=existing.chunk_count,
+                last_indexed_at=existing.last_indexed_at,
+                last_error=error,
+                failed_at_version=__version__,
+            )
+        )
+        return
+
     state.upsert_file(
         FileRecord(
             source_path=abs_path,
@@ -425,6 +523,7 @@ def _record_per_file_error(state: StateDB, path: Path, *, error: str) -> None:
             chunk_count=0,
             last_indexed_at=_utc_now_iso(),
             last_error=error,
+            failed_at_version=__version__,
         )
     )
 

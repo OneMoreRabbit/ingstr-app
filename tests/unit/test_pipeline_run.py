@@ -10,7 +10,7 @@ from collections.abc import Iterator
 from contextlib import ExitStack, contextmanager
 from pathlib import Path
 from typing import Any
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock, Mock, patch
 
 import pytest
 
@@ -33,6 +33,7 @@ from ingstr.exceptions import (
     UpstreamUnavailable,
     WrongOrgFile,
 )
+from ingstr.hashing import sha256_file
 from ingstr.pipeline import run_ingest
 from ingstr.plan import ResolvedPlan
 from ingstr.state import StateDB
@@ -548,3 +549,126 @@ def test_wrong_org_file_is_counted_apart_from_other_errors(fs, monkeypatch) -> N
     assert summary.files_indexed == 1
     # The run completes: one bad file does not abort the others.
     assert summary.files_seen == 2
+
+
+# ── v0.2.1: a file that vanishes, and a failure recorded once ──────────────
+
+
+def test_a_file_that_vanishes_mid_run_does_not_stop_the_run(fs) -> None:
+    """Measured on otter, run 3: a file was listed, then gone when it was
+    hashed, and the FileNotFoundError took the whole run down at exit 4 —
+    discarding every other file's work for one deleted file. A file that
+    cannot be read is that file's result.
+    """
+    cfg, plan, state, root = fs
+    gone = _write(root / "gone.pdf")
+    _write(root / "stays.pdf")
+    embedder = _mock_embedder()
+    qdrant = _mock_qdrant()
+
+    real_sha = sha256_file
+
+    def vanish(path: Path) -> str:
+        if path.name == "gone.pdf":
+            gone.unlink()
+            raise FileNotFoundError(2, "No such file or directory", str(path))
+        return real_sha(path)
+
+    with patch("ingstr.pipeline.sha256_file", side_effect=vanish), \
+         patch("ingstr.pipeline.classify", return_value="arc_g0_engineering_global"), \
+         patch("ingstr.pipeline.parse_file", return_value=["el"]), \
+         patch("ingstr.pipeline.chunk_elements", return_value=[Chunk("c", 0, 1)]):
+        summary = run_ingest(
+            cfg, plan, state=state, embedder=embedder, qdrant=qdrant,
+            full=False, dry_run=False,
+        )
+
+    assert summary.files_errored == 1
+    assert summary.files_indexed == 1
+    assert summary.files_seen == 2
+
+
+def test_a_recorded_failure_is_not_tried_again_while_nothing_changes(fs) -> None:
+    """The cost this release exists to remove: 520 files failing and being
+    re-parsed every five minutes was five of the six minutes an unchanged run
+    took."""
+    cfg, plan, state, root = fs
+    _write(root / "bad.pdf")
+    embedder, qdrant = _mock_embedder(), _mock_qdrant()
+    parse = Mock(side_effect=IngstrError("cannot parse"))
+
+    with patch("ingstr.pipeline.parse_file", parse), \
+         patch("ingstr.pipeline.classify", return_value="arc_g0_engineering_global"):
+        first = run_ingest(cfg, plan, state=state, embedder=embedder,
+                           qdrant=qdrant, full=False, dry_run=False)
+        second = run_ingest(cfg, plan, state=state, embedder=embedder,
+                            qdrant=qdrant, full=False, dry_run=False)
+
+    assert parse.call_count == 1, "the second run parsed it again"
+    # The run is NOT healthier for having skipped it.
+    assert second.files_errored == 1
+    assert second.files_failed_skipped == 1
+    assert first.files_errored == 1
+
+
+def test_a_full_run_tries_every_failure_again(fs) -> None:
+    """The nightly run stays the thorough one — the same division as the
+    hashing. Without this, a file that fails under a version is invisible
+    until it changes or the version does."""
+    cfg, plan, state, root = fs
+    _write(root / "bad.pdf")
+    embedder, qdrant = _mock_embedder(), _mock_qdrant()
+    parse = Mock(side_effect=IngstrError("cannot parse"))
+
+    with patch("ingstr.pipeline.parse_file", parse), \
+         patch("ingstr.pipeline.classify", return_value="arc_g0_engineering_global"):
+        run_ingest(cfg, plan, state=state, embedder=embedder, qdrant=qdrant,
+                   full=False, dry_run=False)
+        run_ingest(cfg, plan, state=state, embedder=embedder, qdrant=qdrant,
+                   full=True, dry_run=False)
+
+    assert parse.call_count == 2
+
+
+def test_a_changed_file_is_tried_again(fs) -> None:
+    cfg, plan, state, root = fs
+    bad = _write(root / "bad.pdf")
+    embedder, qdrant = _mock_embedder(), _mock_qdrant()
+    parse = Mock(side_effect=IngstrError("cannot parse"))
+
+    with patch("ingstr.pipeline.parse_file", parse), \
+         patch("ingstr.pipeline.classify", return_value="arc_g0_engineering_global"):
+        run_ingest(cfg, plan, state=state, embedder=embedder, qdrant=qdrant,
+                   full=False, dry_run=False)
+        bad.write_text("different content, different size and time")
+        run_ingest(cfg, plan, state=state, embedder=embedder, qdrant=qdrant,
+                   full=False, dry_run=False)
+
+    assert parse.call_count == 2
+
+
+def test_a_failure_from_another_version_is_tried_again(fs) -> None:
+    """The half that stops this becoming a trap. "tesseract is not installed"
+    is a fact about the image, not about the file: a record that never expired
+    would mean 213 scanned PDFs are never retried after tesseract is added, by
+    anyone, ever."""
+    cfg, plan, state, root = fs
+    bad = _write(root / "bad.pdf")
+    embedder, qdrant = _mock_embedder(), _mock_qdrant()
+    parse = Mock(side_effect=IngstrError("tesseract is not installed"))
+
+    with patch("ingstr.pipeline.parse_file", parse), \
+         patch("ingstr.pipeline.classify", return_value="arc_g0_engineering_global"):
+        run_ingest(cfg, plan, state=state, embedder=embedder, qdrant=qdrant,
+                   full=False, dry_run=False)
+
+    record = state.get_file(str(bad.resolve()))
+    assert record is not None and record.failed_at_version is not None
+    # The next image is a different version: everything that failed is retried.
+    with patch("ingstr.pipeline.parse_file", parse), \
+         patch("ingstr.pipeline.classify", return_value="arc_g0_engineering_global"), \
+         patch("ingstr.pipeline.__version__", "99.0.0"):
+        run_ingest(cfg, plan, state=state, embedder=embedder, qdrant=qdrant,
+                   full=False, dry_run=False)
+
+    assert parse.call_count == 2

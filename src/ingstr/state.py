@@ -13,7 +13,18 @@ CREATE TABLE IF NOT EXISTS files (
     classification_group TEXT NOT NULL,
     chunk_count          INTEGER NOT NULL,
     last_indexed_at      TEXT NOT NULL,
-    last_error           TEXT
+    last_error           TEXT,
+    -- v0.2.1: the ingstr version that recorded `last_error`. A file that
+    -- failed is not parsed again while it is unchanged AND this matches the
+    -- running version — re-parsing 520 failures every five minutes was five
+    -- of the six minutes an unchanged run took on otter.
+    --
+    -- Keyed to the version because the common failures are ENVIRONMENTAL, not
+    -- properties of the file: "tesseract is not installed" is a fact about the
+    -- image. A permanent record would mean the 213 scanned PDFs are never
+    -- retried after tesseract is added, by anyone, ever. An upgrade retries
+    -- them with nobody remembering to.
+    failed_at_version    TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_files_group ON files(classification_group);
 CREATE INDEX IF NOT EXISTS idx_files_mtime ON files(mtime);
@@ -40,7 +51,13 @@ CREATE TABLE IF NOT EXISTS runs (
     files_skipped   INTEGER,
     files_errored   INTEGER,
     chunks_written  INTEGER,
-    exit_code       INTEGER
+    exit_code       INTEGER,
+    -- v0.2.1: why a removal was refused, if it was. Kept because a refusal is
+    -- a STATE, not a moment: until it is cleared, passages of files whose
+    -- access was taken away can still be found. Before this it existed only
+    -- in one run's stderr, so "is a removal still outstanding?" had no answer
+    -- anyone could ask.
+    purge_refused_reason TEXT
 );
 """
 
@@ -67,6 +84,10 @@ class FileRecord:
     chunk_count: int
     last_indexed_at: str
     last_error: str | None = None
+    #: The ingstr version that recorded `last_error`, or None when the record
+    #: is not a failure (or predates v0.2.1). Compared against the running
+    #: version to decide whether a failure is worth trying again.
+    failed_at_version: str | None = None
 
 
 @dataclass(frozen=True)
@@ -81,6 +102,11 @@ class RunRecord:
     files_errored: int | None
     chunks_written: int | None
     exit_code: int | None
+    #: Set when this run refused to remove passages because too much had
+    #: vanished at once. Kept so the refusal can be asked about later: until
+    #: it is cleared, passages of files whose access was taken away can still
+    #: be found. None on runs that removed normally or removed nothing.
+    purge_refused_reason: str | None = None
 
 
 class StateDB:
@@ -90,13 +116,41 @@ class StateDB:
     (ingest is sequential and per-file; no transactional batching required).
     """
 
+    #: Columns added after the first release. `CREATE TABLE IF NOT EXISTS`
+    #: creates a missing table and does NOTHING to an existing one, so a
+    #: database written by an earlier version keeps its old shape and every
+    #: query naming a new column fails. These are added in place instead.
+    _ADDED_COLUMNS: tuple[tuple[str, str, str], ...] = (
+        ("files", "failed_at_version", "TEXT"),
+        ("runs", "purge_refused_reason", "TEXT"),
+    )
+
     def __init__(self, db_path: Path) -> None:
         self.db_path = db_path
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self._conn = sqlite3.connect(str(db_path))
         self._conn.row_factory = sqlite3.Row
         self._conn.executescript(_SCHEMA)
+        self._add_missing_columns()
         self._conn.commit()
+
+    def _add_missing_columns(self) -> None:
+        """Bring a database written by an earlier version up to this schema.
+
+        Additive only: a column is added with no value, so every existing row
+        reads NULL for it, which every caller already has to handle (a file
+        that failed under an older version has no recorded version, so it is
+        retried — which is the right answer, not a special case).
+        """
+        for table, column, declaration in self._ADDED_COLUMNS:
+            existing = {
+                row["name"]
+                for row in self._conn.execute(f"PRAGMA table_info({table})")
+            }
+            if column not in existing:
+                self._conn.execute(
+                    f"ALTER TABLE {table} ADD COLUMN {column} {declaration}"
+                )
 
     def close(self) -> None:
         self._conn.close()
@@ -123,8 +177,9 @@ class StateDB:
                 """
                 INSERT INTO files (
                     source_path, content_hash, mtime, size_bytes,
-                    classification_group, chunk_count, last_indexed_at, last_error
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    classification_group, chunk_count, last_indexed_at,
+                    last_error, failed_at_version
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(source_path) DO UPDATE SET
                     content_hash         = excluded.content_hash,
                     mtime                = excluded.mtime,
@@ -132,7 +187,8 @@ class StateDB:
                     classification_group = excluded.classification_group,
                     chunk_count          = excluded.chunk_count,
                     last_indexed_at      = excluded.last_indexed_at,
-                    last_error           = excluded.last_error
+                    last_error           = excluded.last_error,
+                    failed_at_version    = excluded.failed_at_version
                 """,
                 (
                     record.source_path,
@@ -143,6 +199,7 @@ class StateDB:
                     record.chunk_count,
                     record.last_indexed_at,
                     record.last_error,
+                    record.failed_at_version,
                 ),
             )
 
@@ -248,6 +305,21 @@ class StateDB:
             ).fetchone()
         return RunRecord(**dict(row)) if row else None
 
+    def last_refused_removal(self) -> RunRecord | None:
+        """The most recent run that refused to remove passages, if any.
+
+        A refusal is a state, not a moment. Until someone clears it, passages
+        of files whose access was taken away are still findable — so the
+        question "is a removal still outstanding?" has to be answerable after
+        the run that refused has gone from the journal.
+        """
+        with self._cursor() as cur:
+            row = cur.execute(
+                "SELECT * FROM runs WHERE purge_refused_reason IS NOT NULL "
+                "ORDER BY run_id DESC LIMIT 1"
+            ).fetchone()
+        return RunRecord(**dict(row)) if row else None
+
     def finish_run(
         self,
         run_id: int,
@@ -259,18 +331,20 @@ class StateDB:
         files_errored: int,
         chunks_written: int,
         exit_code: int,
+        purge_refused_reason: str | None = None,
     ) -> None:
         with self._cursor() as cur:
             cur.execute(
                 """
                 UPDATE runs SET
-                    finished_at    = ?,
-                    files_seen     = ?,
-                    files_indexed  = ?,
-                    files_skipped  = ?,
-                    files_errored  = ?,
-                    chunks_written = ?,
-                    exit_code      = ?
+                    finished_at          = ?,
+                    files_seen           = ?,
+                    files_indexed        = ?,
+                    files_skipped        = ?,
+                    files_errored        = ?,
+                    chunks_written       = ?,
+                    exit_code            = ?,
+                    purge_refused_reason = ?
                 WHERE run_id = ?
                 """,
                 (
@@ -281,6 +355,7 @@ class StateDB:
                     files_errored,
                     chunks_written,
                     exit_code,
+                    purge_refused_reason,
                     run_id,
                 ),
             )
