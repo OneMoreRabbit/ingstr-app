@@ -19,9 +19,17 @@ them re-parsing 520 files that had failed and would fail again. A failure is
 now recorded once. Also: one file vanishing mid-run no longer stops the run,
 and a refused removal can be asked about after the fact.
 
-- **A file that failed is not tried again** while its size, its modified time
-  and the ingstr version are all unchanged. `--full` tries every failure
-  again, so the nightly run stays the thorough one.
+- **A file that failed TO PARSE is not tried again** while its size, its
+  modified time, its classification group and the ingstr version are all
+  unchanged. `--full` tries every failure again, so the nightly run stays the
+  thorough one.
+- **Only parse failures are recorded that way.** A file refused for its group
+  — not in the plan, or another org's — is classified again on every run,
+  because that refusal belongs to the plan and not to the file: a `chgrp`
+  changes neither size nor modified time, and a new plan or a new grant
+  changes nothing in the file at all. So giving a folder a group, or adding a
+  grant, is still picked up by the next ordinary run. A file that could not be
+  read for a moment is tried again too.
 - **The version is part of that** on purpose. The common failures are facts
   about the image, not about the file — "tesseract is not installed" is one —
   so a record that never expired would mean those files are never retried
@@ -45,15 +53,21 @@ and a refused removal can be asked about after the fact.
 
 **What a timer run no longer notices**, until the nightly `--full`:
 
-- a file that failed, was then changed with its size and modified time
-  preserved, and would now parse;
+- a file that failed to parse, was then changed with its size and modified
+  time preserved, and would now parse;
 - a changed setting that would let a failed file parse — when the page limit
   or the language list arrive, raising either does not retry failures until
   the nightly run or the next version.
 
-**Action:** none. An existing state database gains its new columns in place on
-first open; a file that failed under an earlier version has no recorded
-version, so it is tried once more and then recorded properly.
+**Rolling back is safe.** This release keeps its new state in new tables, not
+in new columns on the existing ones. An older image reads `SELECT * FROM
+files` and builds its record from the row, so a column added here would make
+v0.1.1 raise `TypeError` on the first file it looked at — measured, not
+assumed. A table it does not know about is simply never read.
+
+**Action:** none. A database written by an earlier image is read unchanged,
+and a file that failed under one has no recorded version, so it is tried once
+more and then recorded properly.
 
 ## v0.2.0 — 2026-11-13
 

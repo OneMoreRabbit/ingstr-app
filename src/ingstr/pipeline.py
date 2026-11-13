@@ -17,6 +17,7 @@ from .embed import EmbeddingClient
 from .exceptions import (
     ConfigError,
     IngstrError,
+    RecordedFileError,
     UnclassifiableFile,
     UpstreamUnavailable,
     WrongOrgFile,
@@ -163,6 +164,13 @@ def run_ingest(
             # Must come BEFORE the IngstrError handler since UpstreamUnavailable
             # is a subclass.
             raise
+        except RecordedFileError as e:
+            # Already written to the state database, with the group and the
+            # version, by the step that knew them. Count it; do not record it
+            # twice.
+            _log.error("file_failed", source_path=abs_path, error=str(e))
+            summary.files_errored += 1
+            continue
         except IngstrError as e:
             _log.error("file_failed", source_path=abs_path, error=str(e))
             _record_per_file_error(state, path, error=str(e))
@@ -285,6 +293,16 @@ def _process_file(
     existing = state.get_file(abs_path)
     stat_info = path.stat()
 
+    # 1. classify (raises UnclassifiableFile / WrongOrgFile)
+    #
+    #    BEFORE the skip below, deliberately. A file refused for its group is
+    #    refused by the PLAN, not by anything about the file: a chgrp changes
+    #    neither size nor modified time, and a new plan or a new grant changes
+    #    nothing in the file at all. Classifying first is what lets the estate
+    #    give a folder a group, or add a grant, and have the next ordinary run
+    #    pick the files up instead of waiting for 03:00.
+    group = classify(path, plan, cfg.org, stat_info=stat_info)
+
     # 0. A file that failed before, is unchanged, and failed under THIS version
     #    is not tried again (v0.2.1).
     #
@@ -304,11 +322,16 @@ def _process_file(
     #
     #    A record from before v0.2.1 has no version, so it is retried once and
     #    then recorded properly. That is the right answer, not a special case.
+    #    The group is part of the comparison for the same reason: a file that
+    #    could not be parsed under one classification should be looked at
+    #    again if its classification changes, because that is a different
+    #    question about a different audience.
     if (
         not full
         and existing is not None
         and existing.last_error is not None
         and existing.failed_at_version == __version__
+        and existing.classification_group == group
         and existing.mtime == stat_info.st_mtime
         and existing.size_bytes == stat_info.st_size
     ):
@@ -317,9 +340,6 @@ def _process_file(
             chunks=0,
             recorded_error=existing.last_error,
         )
-
-    # 1. classify (raises UnclassifiableFile)
-    group = classify(path, plan, cfg.org)
 
     # 2. hash
     content_hash = sha256_file(path)
@@ -379,10 +399,31 @@ def _process_file(
         return _ProcessOutcome(action="payload_refresh", chunks=existing.chunk_count)
 
     # 3. parse + chunk
-    elements = parse_file(path)  # IngstrError on failure
-    chunks = chunk_elements(elements, cfg.chunking)
-    if not chunks:
-        raise IngstrError(f"{path}: parsed but produced 0 chunks")
+    #
+    #    A failure here is recorded HERE rather than by the caller, because
+    #    only this scope knows the file's classification group — and the group
+    #    is part of what a later run compares before deciding not to try the
+    #    file again. It is also the only failure kind worth not trying again:
+    #    a parse cannot start succeeding until the file or the image changes,
+    #    while everything else (an unreadable moment, a group that is not in
+    #    the plan yet) can.
+    try:
+        elements = parse_file(path)  # IngstrError on failure
+        chunks = chunk_elements(elements, cfg.chunking)
+        if not chunks:
+            raise IngstrError(f"{path}: parsed but produced 0 chunks")
+    except UpstreamUnavailable:
+        raise  # systemic, not this file's fault — the run aborts
+    except IngstrError as e:
+        _record_parse_failure(
+            state,
+            path,
+            error=str(e),
+            group=group,
+            stat_info=stat_info,
+            existing=existing,
+        )
+        raise RecordedFileError(str(e)) from e
 
     # 4. embed (UpstreamUnavailable propagates)
     texts = [c.text for c in chunks]
@@ -508,7 +549,9 @@ def _record_per_file_error(state: StateDB, path: Path, *, error: str) -> None:
                 chunk_count=existing.chunk_count,
                 last_indexed_at=existing.last_indexed_at,
                 last_error=error,
-                failed_at_version=__version__,
+                # No version: this kind of failure is not a property of the
+                # file and the image, so it is tried again on every run.
+                failed_at_version=None,
             )
         )
         return
@@ -522,6 +565,40 @@ def _record_per_file_error(state: StateDB, path: Path, *, error: str) -> None:
             classification_group="",
             chunk_count=0,
             last_indexed_at=_utc_now_iso(),
+            last_error=error,
+            failed_at_version=None,
+        )
+    )
+
+
+def _record_parse_failure(
+    state: StateDB,
+    path: Path,
+    *,
+    error: str,
+    group: str,
+    stat_info: os.stat_result,
+    existing: FileRecord | None,
+) -> None:
+    """Record a parse failure with everything a later run needs to decide.
+
+    The file as it is NOW (size, modified time), the group it classified as,
+    and the version that could not read it. A run skips this file only while
+    all four still match — so a changed file, a re-classified file, or a new
+    image all get another attempt, and nothing else does.
+    """
+    abs_path = str(path.resolve())
+    state.upsert_file(
+        FileRecord(
+            source_path=abs_path,
+            # Whatever was indexed from this file before stays indexed; a
+            # failure to re-read it is not a reason to forget it.
+            content_hash=existing.content_hash if existing else "",
+            mtime=stat_info.st_mtime,
+            size_bytes=stat_info.st_size,
+            classification_group=group,
+            chunk_count=existing.chunk_count if existing else 0,
+            last_indexed_at=existing.last_indexed_at if existing else _utc_now_iso(),
             last_error=error,
             failed_at_version=__version__,
         )

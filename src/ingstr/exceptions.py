@@ -49,3 +49,17 @@ class WrongOrgFile(IngstrError):
         self.group = group
         self.group_org = group_org
         self.run_org = run_org
+
+
+class RecordedFileError(IngstrError):
+    """A per-file failure already written to the state database by the step
+    that raised it, because only that step knew what to record.
+
+    A parse failure is recorded where the file's classification group is still
+    in hand, so a later run can ask "is this the same file, under the same
+    image, with the same group?" before deciding not to try again. The caller
+    counts it and moves on; it must not record it a second time.
+    """
+
+    def __init__(self, message: str) -> None:
+        super().__init__(message)

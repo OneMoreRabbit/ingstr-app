@@ -292,7 +292,7 @@ def test_unclassifiable_file_is_errored_not_aborted(fs) -> None:
     qdrant = _mock_qdrant()
 
     # `classify` raises UnclassifiableFile only for "a.pdf"
-    def fake_classify(path, _plan, _org):
+    def fake_classify(path, _plan, _org, **_kwargs):
         if path.name == "a.pdf":
             raise UnclassifiableFile(path, gid=9999)
         return "arc_g0_engineering_global"
@@ -531,7 +531,7 @@ def test_wrong_org_file_is_counted_apart_from_other_errors(fs, monkeypatch) -> N
     embedder = _mock_embedder()
     qdrant = _mock_qdrant()
 
-    def fake_classify(path, _plan, org):
+    def fake_classify(path, _plan, org, **_kwargs):
         if path.name == "theirs.pdf":
             raise WrongOrgFile(path, gid=1200, group="job_g1", group_org="job", run_org=org)
         return "arc_g0_engineering_global"
@@ -668,6 +668,97 @@ def test_a_failure_from_another_version_is_tried_again(fs) -> None:
     with patch("ingstr.pipeline.parse_file", parse), \
          patch("ingstr.pipeline.classify", return_value="arc_g0_engineering_global"), \
          patch("ingstr.pipeline.__version__", "99.0.0"):
+        run_ingest(cfg, plan, state=state, embedder=embedder, qdrant=qdrant,
+                   full=False, dry_run=False)
+
+    assert parse.call_count == 2
+
+
+def test_a_file_refused_for_its_group_is_classified_again_every_run(fs) -> None:
+    """The fault arch caught before the tag (hub #13989).
+
+    A file refused for its group is refused by the PLAN, not by anything about
+    the file: a chgrp changes neither size nor modified time, and a new plan or
+    a new grant changes nothing in the file at all. If such a refusal were
+    recorded like a parse failure, giving a folder a group would not be noticed
+    by an ordinary run — only by the nightly one at 03:00.
+    """
+    cfg, plan, state, root = fs
+    _write(root / "nogroup.pdf")
+    embedder, qdrant = _mock_embedder(), _mock_qdrant()
+    classify = Mock(side_effect=UnclassifiableFile(root / "nogroup.pdf", gid=9999))
+
+    with patch("ingstr.pipeline.classify", classify):
+        run_ingest(cfg, plan, state=state, embedder=embedder, qdrant=qdrant,
+                   full=False, dry_run=False)
+        run_ingest(cfg, plan, state=state, embedder=embedder, qdrant=qdrant,
+                   full=False, dry_run=False)
+
+    assert classify.call_count == 2, "the second run did not classify it again"
+
+
+def test_a_file_of_another_org_is_classified_again_every_run(fs) -> None:
+    """Same reason: whose org a group belongs to is a fact about the plan."""
+    cfg, plan, state, root = fs
+    _write(root / "theirs.pdf")
+    embedder, qdrant = _mock_embedder(), _mock_qdrant()
+    classify = Mock(side_effect=WrongOrgFile(
+        root / "theirs.pdf", gid=1200, group="job_g1", group_org="job", run_org="test"
+    ))
+
+    with patch("ingstr.pipeline.classify", classify):
+        run_ingest(cfg, plan, state=state, embedder=embedder, qdrant=qdrant,
+                   full=False, dry_run=False)
+        run_ingest(cfg, plan, state=state, embedder=embedder, qdrant=qdrant,
+                   full=False, dry_run=False)
+
+    assert classify.call_count == 2
+
+
+def test_an_unreadable_moment_is_tried_again(fs) -> None:
+    """A share hiccup or a permission being applied is not a property of the
+    file. It must not wait for 03:00 either."""
+    cfg, plan, state, root = fs
+    f = _write(root / "busy.pdf")
+    embedder, qdrant = _mock_embedder(), _mock_qdrant()
+    calls = {"n": 0}
+
+    def flaky(path: Path) -> str:
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise PermissionError(13, "Permission denied", str(path))
+        return "hash-after"
+
+    with patch("ingstr.pipeline.sha256_file", side_effect=flaky), \
+         patch("ingstr.pipeline.classify", return_value="arc_g0_engineering_global"), \
+         patch("ingstr.pipeline.parse_file", return_value=["el"]), \
+         patch("ingstr.pipeline.chunk_elements", return_value=[Chunk("c", 0, 1)]):
+        first = run_ingest(cfg, plan, state=state, embedder=embedder, qdrant=qdrant,
+                           full=False, dry_run=False)
+        second = run_ingest(cfg, plan, state=state, embedder=embedder, qdrant=qdrant,
+                            full=False, dry_run=False)
+
+    assert first.files_errored == 1
+    assert second.files_indexed == 1, "the retry never happened"
+    assert f.exists()
+
+
+def test_a_parse_failure_is_tried_again_when_the_group_changes(fs) -> None:
+    """A file that could not be parsed under one classification is looked at
+    again when its classification changes: a different audience is a different
+    question, and it matters once a grant can change a group with no change to
+    the file."""
+    cfg, plan, state, root = fs
+    _write(root / "bad.pdf")
+    embedder, qdrant = _mock_embedder(), _mock_qdrant()
+    parse = Mock(side_effect=IngstrError("cannot parse"))
+
+    with patch("ingstr.pipeline.parse_file", parse), \
+         patch("ingstr.pipeline.classify", return_value="arc_g0_engineering_global"):
+        run_ingest(cfg, plan, state=state, embedder=embedder, qdrant=qdrant,
+                   full=False, dry_run=False)
+    with patch("ingstr.pipeline.parse_file", parse), \
+         patch("ingstr.pipeline.classify", return_value="arc_g18_any_global"):
         run_ingest(cfg, plan, state=state, embedder=embedder, qdrant=qdrant,
                    full=False, dry_run=False)
 

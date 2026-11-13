@@ -186,11 +186,65 @@ def test_underscores_in_a_path_are_not_wildcards(tmp_path: Path) -> None:
 # ── v0.2.1 ─────────────────────────────────────────────────────────────────
 
 
-def test_a_database_from_an_earlier_version_gains_the_new_columns(tmp_path):
-    """`CREATE TABLE IF NOT EXISTS` creates a missing table and does NOTHING
-    to an existing one, so a database written by v0.1.x or v0.2.0 keeps its
-    old shape and every query naming a new column fails. ARC's state database
-    is one of those."""
+def test_an_older_image_can_still_read_this_database(tmp_path):
+    """A roll back must keep working.
+
+    v0.2.1 first added its state as new COLUMNS, and that breaks an older
+    image: v0.1.1 reads `SELECT * FROM files` and builds its record from the
+    row, so an added column is an unexpected field and it raises TypeError.
+    Measured, not assumed. New TABLES are simply not looked at, which is why
+    the state lives in them.
+    """
+    import sqlite3
+
+    db = tmp_path / "s.db"
+    state = StateDB(db)
+    try:
+        state.upsert_file(
+            FileRecord(
+                source_path="/mnt/data/a.pdf", content_hash="h", mtime=1.0,
+                size_bytes=2, classification_group="g", chunk_count=1,
+                last_indexed_at="t", last_error="broke", failed_at_version="0.2.1",
+            )
+        )
+        run_id = state.start_run(mode="full", started_at="t0")
+        state.finish_run(
+            run_id, finished_at="t1", files_seen=1, files_indexed=0,
+            files_skipped=0, files_errored=1, chunks_written=0, exit_code=3,
+            purge_refused_reason="would remove 900 of 1000",
+        )
+    finally:
+        state.close()
+
+    # What an older image does: SELECT * and build its record from the row.
+    conn = sqlite3.connect(db)
+    conn.row_factory = sqlite3.Row
+    try:
+        file_row = dict(conn.execute(
+            "SELECT * FROM files WHERE source_path = ?", ("/mnt/data/a.pdf",)
+        ).fetchone())
+        run_row = dict(conn.execute("SELECT * FROM runs LIMIT 1").fetchone())
+    finally:
+        conn.close()
+
+    older_file_fields = {
+        "source_path", "content_hash", "mtime", "size_bytes",
+        "classification_group", "chunk_count", "last_indexed_at", "last_error",
+    }
+    older_run_fields = {
+        "run_id", "started_at", "finished_at", "mode", "files_seen",
+        "files_indexed", "files_skipped", "files_errored", "chunks_written",
+        "exit_code",
+    }
+    assert set(file_row) == older_file_fields
+    assert set(run_row) == older_run_fields
+
+
+def test_a_database_from_an_earlier_version_is_read_unchanged(tmp_path):
+    """The other direction: v0.2.1 opening a database an older image wrote.
+    The side tables are created; the existing rows are untouched; a file that
+    failed under an older image has no recorded version, so it is tried once
+    more and then recorded properly."""
     import sqlite3
 
     db = tmp_path / "old.db"
@@ -217,8 +271,6 @@ def test_a_database_from_an_earlier_version_gains_the_new_columns(tmp_path):
     try:
         record = state.get_file("/mnt/data/a.pdf")
         assert record is not None
-        # The row survives, and the file is retried once because nothing says
-        # which version recorded its failure.
         assert record.last_error == "broke"
         assert record.failed_at_version is None
         assert state.last_refused_removal() is None
