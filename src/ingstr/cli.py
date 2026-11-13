@@ -276,18 +276,31 @@ def health(config: ConfigOption = DEFAULT_CONFIG_PATH, org: OrgOption = None) ->
                     "not declared — no granted file can be matched"
                 )
             elif not under:
+                # NOT a failure. One plan serves every org, so an org with no
+                # access rule of its own legitimately has none under its path
+                # — and failing there would be a check that fires when
+                # nothing is wrong, which is how a check stops being read
+                # (constitution §9). A wrong plan_path looks the same from
+                # here, so this is said as a NOTE and kept distinct from the
+                # failures above it: not declared is a failure; declared and
+                # matching nothing is worth a look.
                 detail = (
-                    f"NONE of the plan's {len(plan.grants)} granted folder(s) "
-                    f"lie under source.plan_path={cfg.source.plan_path!r} — "
-                    "the value is probably wrong, and a wrong one matches "
-                    "nothing silently"
+                    f"note: none of the plan's {len(plan.grants)} granted "
+                    f"folder(s) lie under source.plan_path="
+                    f"{cfg.source.plan_path!r}. Expected when this org has no "
+                    "access rule of its own; otherwise the value is wrong, "
+                    "and a wrong one matches nothing silently"
                 )
             else:
                 detail = (
                     f"{len(under)} of {len(plan.grants)} granted folder(s) lie "
                     f"under source.plan_path={cfg.source.plan_path!r}"
                 )
-            checks.append(("plan.grants", bool(under), detail))
+            # Only the undeclared case fails; "declared, matched nothing" is
+            # reported and passes.
+            checks.append(
+                ("plan.grants", cfg.source.plan_path is not None, detail)
+            )
         org_gids = plan.gids_for_org(cfg.org)
         checks.append(
             (

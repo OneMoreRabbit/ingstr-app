@@ -154,13 +154,46 @@ class StateDB:
     (ingest is sequential and per-file; no transactional batching required).
     """
 
+    #: Columns added to a table a PREVIOUS ingstr version already created.
+    #: `CREATE TABLE IF NOT EXISTS` creates a missing table and does NOTHING
+    #: to an existing one, so these have to be added in place or every query
+    #: naming them fails on a database an older version made.
+    #:
+    #: Only ever on tables NO OLDER IMAGE READS. v0.2.1 created `run_removals`
+    #: and selects named columns from it, never `*`, so adding to it breaks
+    #: nothing going back. Adding to `files` or `runs` WOULD break v0.1.1,
+    #: which builds its record from `SELECT *` — that is why the v0.2.1 state
+    #: went into new tables in the first place, and the rule still holds.
+    _ADDED_COLUMNS: tuple[tuple[str, str, str], ...] = (
+        ("run_removals", "gone_count", "INTEGER"),
+        ("run_removals", "lost_access_count", "INTEGER"),
+    )
+
     def __init__(self, db_path: Path) -> None:
         self.db_path = db_path
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self._conn = sqlite3.connect(str(db_path))
         self._conn.row_factory = sqlite3.Row
         self._conn.executescript(_SCHEMA)
+        self._add_missing_columns()
         self._conn.commit()
+
+    def _add_missing_columns(self) -> None:
+        """Add columns to tables an earlier version of ingstr created.
+
+        Additive only: existing rows read NULL, which every caller already
+        handles — a refusal recorded by v0.2.1 has no counts, and is shown
+        without them rather than not shown.
+        """
+        for table, column, declaration in self._ADDED_COLUMNS:
+            existing = {
+                row["name"]
+                for row in self._conn.execute(f"PRAGMA table_info({table})")
+            }
+            if column not in existing:
+                self._conn.execute(
+                    f"ALTER TABLE {table} ADD COLUMN {column} {declaration}"
+                )
 
     def close(self) -> None:
         self._conn.close()
