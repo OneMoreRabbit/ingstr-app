@@ -9,12 +9,13 @@ import pathspec
 import structlog
 
 from . import __version__
-from .availability import DEFAULT_PURGE_THRESHOLD, assess_purge
+from .availability import DEFAULT_PURGE_THRESHOLD, PurgeVerdict, assess_purge
 from .chunk import Chunk, chunk_elements
 from .classify import classify
 from .config import OrgView
 from .embed import EmbeddingClient
 from .exceptions import (
+    AmbiguousGrant,
     ConfigError,
     IngstrError,
     RecordedFileError,
@@ -27,6 +28,13 @@ from .parse import parse_file
 from .plan import ResolvedPlan
 from .qdrant_io import QdrantPoint, QdrantWriter
 from .state import FileRecord, StateDB
+
+#: The verdict a declared `--expect-removals` produces. Separate from the
+#: guard's own verdicts so the log line and the reason both say plainly that
+#: a person allowed this, rather than that the threshold was satisfied.
+_ALLOWED_BY_DECLARATION = PurgeVerdict(
+    allowed=True, reason="allowed by a declared --expect-removals"
+)
 
 # Stable namespace for deterministic point IDs.
 # Changing this would orphan all previously-written points; do not edit.
@@ -60,6 +68,19 @@ class RunSummary:
     #: skipped them. This number says how much of the error count was carried
     #: rather than discovered.
     files_failed_skipped: int = 0
+    #: Files refused because the folder granting them carries more than one
+    #: group. Counted apart because it is the grants that need fixing, not
+    #: the files.
+    files_ambiguous_grant: int = 0
+    #: Passages removed because their file can no longer be classified — its
+    #: group left the plan, a grant was withdrawn, or it is now another org's.
+    #: Counted apart from files gone from disk: one is access being taken
+    #: away, the other is a file being deleted, and an operator reading a
+    #: refusal needs to know which. On a dry run or a refusal these hold what
+    #: WOULD have been removed, which is where --expect-removals' number
+    #: comes from.
+    passages_removed_lost_access: int = 0
+    passages_removed_gone: int = 0
     #: True when the run reached the step that removes passages. A run that
     #: aborted before it neither raises a refusal nor clears one.
     reached_removal_step: bool = False
@@ -97,6 +118,7 @@ def run_ingest(
     qdrant: QdrantWriter,
     full: bool,
     dry_run: bool,
+    expect_removals: int | None = None,
 ) -> RunSummary:
     """Walk source.root and run the per-file pipeline (brief §8).
 
@@ -111,6 +133,9 @@ def run_ingest(
     """
     summary = RunSummary()
     seen: set[str] = set()
+    #: Files still on disk whose passages must go because the plan no longer
+    #: classifies them. Collected here and applied with the orphans below.
+    lost_access: set[str] = set()
 
     for path in iter_source_files(
         cfg.source.root,
@@ -141,12 +166,13 @@ def run_ingest(
             _record_per_file_error(state, path, error=f"could not read: {e}", dry_run=dry_run)
             summary.files_errored += 1
             continue
-        except UnclassifiableFile as e:
-            _log.warning(
-                "file_unclassifiable", source_path=abs_path, gid=e.gid
-            )
+        except (UnclassifiableFile, AmbiguousGrant) as e:
+            _log.warning("file_unclassifiable", source_path=abs_path, error=str(e))
             _record_per_file_error(state, path, error=str(e), dry_run=dry_run)
             summary.files_errored += 1
+            if isinstance(e, AmbiguousGrant):
+                summary.files_ambiguous_grant += 1
+            _note_for_removal(state, abs_path, lost_access)
             continue
         except WrongOrgFile as e:
             _log.error(
@@ -160,6 +186,7 @@ def run_ingest(
             _record_per_file_error(state, path, error=str(e), dry_run=dry_run)
             summary.files_errored += 1
             summary.files_wrong_org += 1
+            _note_for_removal(state, abs_path, lost_access)
             continue
         except UpstreamUnavailable:
             # Systemic failure — Ollama/Qdrant unreachable. Don't swallow:
@@ -202,18 +229,35 @@ def run_ingest(
             summary.files_indexed += 1
             summary.chunks_written += outcome.chunks
 
-    if full and not dry_run:
-        summary.reached_removal_step = True
-        known = state.all_paths()
-        orphans = sorted(known - seen)
+    # The removal step. TAKING ACCESS AWAY MUST TAKE IT AWAY IN SEARCH, so
+    # files that can no longer be classified are removed in EVERY run, not
+    # only in --full. Orphans — files gone from disk — are a full-run concern
+    # as before, because only a full walk has seen the whole tree.
+    known = state.all_paths()
+    orphans = sorted(known - seen) if full else []
+    lost = sorted(lost_access)
 
-        # ADR-0010 §6 layer 3. Orphan deletion is the only destructive operation
-        # here and it is driven by *absence of evidence* — a file not being seen
-        # this run. Absence is exactly what a broken mount produces, so the two
-        # are indistinguishable from inside this function. The guard does not
-        # try to tell them apart; it refuses when the scale of the deletion is
-        # implausible, which is the one thing that does not require knowing
-        # which happened.
+    # A full run ALWAYS reaches the step, including when it finds nothing to
+    # remove — that is what lets a clean run clear an earlier refusal. Setting
+    # this only when there was something to remove meant: mount breaks, the
+    # nightly run refuses; mount comes back, the next nightly run finds
+    # nothing, writes no row, and `ingstr stats` keeps showing REMOVAL REFUSED
+    # until some later run happens to delete a file. That is the exact case
+    # the v0.2.1 fix was for, and this release had quietly undone it.
+    if not dry_run and (full or orphans or lost):
+        summary.reached_removal_step = True
+
+        # ADR-0010 §6 layer 3. Deletion is the only destructive operation here,
+        # and for orphans it is driven by *absence of evidence* — a file not
+        # being seen this run. Absence is exactly what a broken mount produces,
+        # so the two are indistinguishable from inside this function. The guard
+        # does not try to tell them apart; it refuses when the scale of the
+        # deletion is implausible, which is the one thing that does not require
+        # knowing which happened.
+        #
+        # Files that lost access count against the same threshold, because a
+        # plan read from a half-written file could re-classify everything at
+        # once, and that is the same accident wearing different clothes.
         threshold = (
             cfg.agent_source.purge_threshold
             if cfg.agent_source is not None
@@ -221,18 +265,38 @@ def run_ingest(
         )
         verdict = assess_purge(
             known_count=len(known),
-            vanished_count=len(orphans),
+            vanished_count=len(orphans) + len(lost),
             threshold=threshold,
+            gone_count=len(orphans),
+            lost_access_count=len(lost),
         )
+        # An operator who has LOOKED may declare what they expect. A number
+        # cannot be typed from habit the way a --force flag can: it has to
+        # come from somewhere, and the only place it comes from is a dry run.
+        if (
+            not verdict.allowed
+            and expect_removals is not None
+            and len(orphans) + len(lost) <= expect_removals
+        ):
+            _log.warning(
+                "purge_allowed_by_declaration",
+                gone=len(orphans),
+                lost_access=len(lost),
+                declared=expect_removals,
+            )
+            verdict = _ALLOWED_BY_DECLARATION
         if not verdict.allowed:
             _log.error(
                 "purge_refused",
                 known=len(known),
-                vanished=len(orphans),
+                gone=len(orphans),
+                lost_access=len(lost),
                 threshold=threshold,
                 reason=verdict.reason,
             )
             summary.purge_refused_reason = verdict.reason
+            summary.passages_removed_gone = len(orphans)
+            summary.passages_removed_lost_access = len(lost)
             return summary
 
         for orphan_path in orphans:
@@ -240,6 +304,20 @@ def run_ingest(
             qdrant.delete_points_by_source_path(orphan_path)
             state.delete_file(orphan_path)
             summary.files_deleted += 1
+            summary.passages_removed_gone += 1
+
+        for lost_path in lost:
+            # No source_path in the log: it is org data, and this is otter's
+            # journal. The counts say what happened; the paths are in the tree.
+            _log.info("file_access_lost_removed")
+            qdrant.delete_points_by_source_path(lost_path)
+            state.delete_file(lost_path)
+            summary.passages_removed_lost_access += 1
+    elif dry_run and (orphans or lost):
+        # A dry run reports what it WOULD remove and removes nothing. This is
+        # where the number for --expect-removals comes from.
+        summary.passages_removed_gone = len(orphans)
+        summary.passages_removed_lost_access = len(lost)
 
     return summary
 
@@ -275,6 +353,37 @@ def iter_source_files(
             yield path
 
 
+def _file_plan_path(cfg: OrgView, rel_path: str) -> str | None:
+    """This file's path as the PLAN would write it, or None if unknowable.
+
+    The plan writes its grant paths relative to a root on beaver; this
+    container sees its own mount point. `source.plan_path` is the declared
+    part in between — the only thing that relates the two, and knowable only
+    to whoever chose what to mount.
+    """
+    if cfg.source.plan_path is None:
+        return None
+    return cfg.source.plan_path + rel_path
+
+
+def _note_for_removal(state: StateDB, abs_path: str, lost_access: set[str]) -> None:
+    """Mark a file whose passages must go because it can no longer be
+    classified.
+
+    Collected during the walk and applied at the end with the orphans, under
+    one guard and one count — not deleted the moment it is found. Two reasons,
+    and the second is the one that matters: the guard then sees the TOTAL of
+    both kinds before anything is deleted, and a run about to remove too much
+    removes nothing at all rather than stopping half way through.
+
+    Only a file with passages is worth noting. One that never indexed has
+    nothing to remove, and refusing it is already the whole story.
+    """
+    existing = state.get_file(abs_path)
+    if existing is not None and existing.chunk_count > 0:
+        lost_access.add(abs_path)
+
+
 def _rel_posix(path: Path, root: Path) -> str:
     return path.relative_to(root).as_posix()
 
@@ -305,7 +414,13 @@ def _process_file(
     #    nothing in the file at all. Classifying first is what lets the estate
     #    give a folder a group, or add a grant, and have the next ordinary run
     #    pick the files up instead of waiting for 03:00.
-    group = classify(path, plan, cfg.org, stat_info=stat_info)
+    group = classify(
+        path,
+        plan,
+        cfg.org,
+        stat_info=stat_info,
+        file_plan_path=_file_plan_path(cfg, rel_path),
+    )
 
     # 0. A file that failed before, is unchanged, and failed under THIS version
     #    is not tried again (v0.2.1).

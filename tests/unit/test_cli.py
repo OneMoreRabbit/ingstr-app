@@ -294,3 +294,37 @@ def test_one_org_configured_needs_no_org_flag(tmp_path: Path) -> None:
     cfg = _cfg_file(tmp_path)
     result = runner.invoke(app, ["stats", "--config", str(cfg)])
     assert result.exit_code == 0
+
+
+def test_health_does_not_fail_an_org_with_no_grant_of_its_own(tmp_path: Path) -> None:
+    """arch, hub #14022. One plan serves every org, so an org with no access
+    rule of its own legitimately has none under its path. Failing there is a
+    check that fires when nothing is wrong, which is how a check stops being
+    read (constitution §9). It is a note; only an undeclared plan_path fails.
+    """
+    root = tmp_path / "src"
+    root.mkdir()
+    plan = tmp_path / "plan.yml"
+    plan.write_text(
+        "required_groups:\n- arc_share_global\n"
+        "groups:\n- {name: arc_share_global, org: job, grade: s,\n"
+        "   vertical: share, scope: global}\n"
+        "acl_grants:\n- {path: 'arc/drive/zambia/', group: arc_share_global,\n"
+        "   access: read, default_acl: true, description: '',\n"
+        "   source_file: orgs/arc.yml}\n"
+    )
+    gid_map = tmp_path / "gid_map.yml"
+    gid_map.write_text("groups:\n  arc_share_global: 1500\n")
+    cfg = tmp_path / "config.yml"
+    cfg.write_text(
+        _MIN_CFG.format(root=root, plan=plan, gid_map=gid_map, db=tmp_path / "s.db")
+        .replace(f"      root: {root}", f"      root: {root}\n      plan_path: job/")
+    )
+
+    result = runner.invoke(app, ["health", "--config", str(cfg)])
+    output = result.stdout + str(result.stderr or "")
+    assert "note:" in output
+    # The plan check passes; any non-zero here comes from Qdrant/Ollama being
+    # unreachable in a test, not from the grant check.
+    assert "plan.grants" in output
+    assert "FAIL  plan.grants" not in output

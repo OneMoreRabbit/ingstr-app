@@ -19,8 +19,32 @@ class ResolvedPlan:
     gid_to_group: dict[int, str]
     required_groups: frozenset[str]
     group_org: dict[str, str]
+    #: Every `acl_grants` path and the groups granted on it, the path exactly
+    #: as the plan writes it (no leading slash, one trailing slash, relative
+    #: to `meta.path_roots.acl`). A path may legally carry several grants with
+    #: different groups, which is why the value is a set and not a name.
+    grants: dict[str, frozenset[str]]
     plan_source_path: Path
     map_source_path: Path
+
+    def grant_for(self, plan_path: str) -> tuple[str, frozenset[str]] | None:
+        """The grant governing `plan_path`, or None.
+
+        `plan_path` is the file's path below the plan's `acl` root, in the
+        plan's own form. The DEEPEST granted directory containing it wins:
+        the contract permits nested entries and says nothing about which
+        applies, so this is ingstr's rule and it is the only one that makes a
+        narrower share mean anything.
+
+        Returns the winning path with the groups granted on it — more than one
+        when the same path carries several grants, which the caller refuses
+        rather than choosing between.
+        """
+        best: tuple[str, frozenset[str]] | None = None
+        for path, groups in self.grants.items():
+            if plan_path.startswith(path) and (best is None or len(path) > len(best[0])):
+                best = (path, groups)
+        return best
 
     def gids_for_org(self, org: str) -> frozenset[int]:
         """The GIDs of the groups belonging to `org`.
@@ -66,6 +90,7 @@ def load_plan(compiled_plan_path: Path, group_gid_map_path: Path) -> ResolvedPla
     """
     required_groups = _load_required_groups(compiled_plan_path)
     group_org = _load_group_orgs(compiled_plan_path, required_groups)
+    grants = _load_acl_grants(compiled_plan_path, required_groups)
     name_to_gid = _load_group_gid_map(group_gid_map_path)
 
     unknown = sorted(set(name_to_gid) - required_groups)
@@ -96,6 +121,7 @@ def load_plan(compiled_plan_path: Path, group_gid_map_path: Path) -> ResolvedPla
         gid_to_group=gid_to_group,
         required_groups=frozenset(required_groups),
         group_org=group_org,
+        grants=grants,
         plan_source_path=compiled_plan_path,
         map_source_path=group_gid_map_path,
     )
@@ -162,6 +188,53 @@ def _load_group_orgs(path: Path, required_groups: set[str]) -> dict[str, str]:
             f"missing from groups: {missing}; not in required_groups: {extra}"
         )
     return out
+
+
+def _load_acl_grants(path: Path, required_groups: set[str]) -> dict[str, frozenset[str]]:
+    """Read `acl_grants[]`: folders shared by an added ACL rather than by
+    classification.
+
+    Such a folder keeps its own owner, group and mode on purpose — that is the
+    whole point of the mechanism, and rewriting ownership under a one-way copy
+    is what broke the Zambia sync. So its files carry no RBAC group and would
+    never be indexed without this section.
+
+    Absent or empty is normal and not an error: a plan with no grants simply
+    grants nothing. Only the fields ingstr needs are read; the rest of the
+    entry belongs to whoever applies the ACL.
+    """
+    raw = _read_yaml(path)
+    rows = raw.get("acl_grants")
+    if rows is None:
+        return {}
+    if not isinstance(rows, list):
+        raise PlanError(f"{path}: 'acl_grants' must be a list of entries")
+    out: dict[str, set[str]] = {}
+    for row in rows:
+        if not isinstance(row, dict):
+            raise PlanError(f"{path}: each 'acl_grants' entry must be a mapping, got {row!r}")
+        grant_path, group = row.get("path"), row.get("group")
+        if not isinstance(grant_path, str) or not isinstance(group, str):
+            raise PlanError(
+                f"{path}: each 'acl_grants' entry needs string 'path' and 'group', got {row!r}"
+            )
+        if grant_path.startswith("/") or not grant_path.endswith("/"):
+            # The plan's path convention, stated in the contract: no leading
+            # slash, exactly one trailing slash. Checked because a path that
+            # breaks it would silently match nothing, or match too much.
+            raise PlanError(
+                f"{path}: 'acl_grants' path {grant_path!r} must not begin with "
+                "'/' and must end with exactly one '/'"
+            )
+        if group not in required_groups:
+            # The contract guarantees this. A plan that breaks it would have
+            # ingstr stamp a group no consumer can resolve.
+            raise PlanError(
+                f"{path}: 'acl_grants' grants {group!r} on {grant_path!r}, "
+                "which is not in required_groups"
+            )
+        out.setdefault(grant_path, set()).add(group)
+    return {p: frozenset(g) for p, g in out.items()}
 
 
 def _load_group_gid_map(path: Path) -> dict[str, int]:

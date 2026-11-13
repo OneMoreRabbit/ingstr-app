@@ -381,3 +381,69 @@ def test_forgetting_a_file_forgets_its_failure_too(tmp_path):
         assert record is not None and record.failed_at_version is None
     finally:
         state.close()
+
+
+def test_a_database_made_by_v0_2_1_gains_the_removal_counts(tmp_path):
+    """arch ran this rather than reading it (hub #14022), and it failed.
+
+    v0.2.2 added two columns to `run_removals` inside
+    `CREATE TABLE IF NOT EXISTS`. On a database where v0.2.1 had already made
+    that table, nothing was added and every statement naming the columns
+    failed — the same mistake the v0.2.1 state went into new tables to avoid,
+    made one release later on the table those new tables created.
+
+    Adding to `run_removals` is safe in both directions: no older image reads
+    it with `SELECT *`.
+    """
+    import sqlite3
+
+    db = tmp_path / "v021.db"
+    conn = sqlite3.connect(db)
+    conn.executescript(
+        """
+        CREATE TABLE files (
+            source_path TEXT PRIMARY KEY, content_hash TEXT NOT NULL,
+            mtime REAL NOT NULL, size_bytes INTEGER NOT NULL,
+            classification_group TEXT NOT NULL, chunk_count INTEGER NOT NULL,
+            last_indexed_at TEXT NOT NULL, last_error TEXT);
+        CREATE TABLE runs (
+            run_id INTEGER PRIMARY KEY AUTOINCREMENT, started_at TEXT NOT NULL,
+            finished_at TEXT, mode TEXT NOT NULL, files_seen INTEGER,
+            files_indexed INTEGER, files_skipped INTEGER, files_errored INTEGER,
+            chunks_written INTEGER, exit_code INTEGER);
+        CREATE TABLE file_failures (
+            source_path TEXT PRIMARY KEY, failed_at_version TEXT NOT NULL,
+            recorded_at TEXT NOT NULL);
+        -- v0.2.1's shape: no counts
+        CREATE TABLE run_removals (
+            run_id TEXT PRIMARY KEY, refused_reason TEXT);
+        INSERT INTO runs (started_at, mode, finished_at, exit_code)
+            VALUES ('t0', 'full', 't1', 3);
+        INSERT INTO run_removals VALUES ('1', 'refused by v0.2.1');
+        """
+    )
+    conn.commit()
+    conn.close()
+
+    state = StateDB(db)
+    try:
+        # The refusal v0.2.1 recorded is still found, without counts.
+        refused = state.outstanding_refused_removal()
+        assert refused is not None
+        assert refused.purge_refused_reason == "refused by v0.2.1"
+        assert refused.gone_count is None
+
+        # And this version can write a refusal with counts.
+        run_id = state.start_run(mode="full", started_at="t2")
+        state.finish_run(
+            run_id, finished_at="t3", files_seen=1, files_indexed=0,
+            files_skipped=0, files_errored=0, chunks_written=0, exit_code=3,
+            purge_refused_reason="refused by v0.2.2",
+            reached_removal_step=True, gone_count=2, lost_access_count=3,
+        )
+        now = state.outstanding_refused_removal()
+        assert now is not None
+        assert now.gone_count == 2
+        assert now.lost_access_count == 3
+    finally:
+        state.close()

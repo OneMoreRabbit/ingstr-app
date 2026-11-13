@@ -26,6 +26,13 @@ WorkingDirectory=/home/otter/docker/ingstr/%i
 
 # No -f: compose reads compose.yml from WorkingDirectory, which is what keeps
 # the project name per-org. -T because there is no terminal under systemd.
+#
+# AND NO --expect-removals, EVER, IN A UNIT. That flag lets a run remove more
+# passages than the guard would allow, and it exists to be typed by hand, for
+# one run, by someone who has looked at a --dry-run first. In a unit it would
+# stand for "whatever you were about to delete, do it" — on a timer, every
+# night, unattended. If a removal is refused, the fix is a person reading the
+# counts, not a bigger number in this file.
 ExecStart=/usr/bin/docker compose --env-file secrets.env run --rm -T ingstr ingest --org %i
 StandardOutput=journal
 StandardError=journal

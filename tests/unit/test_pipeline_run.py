@@ -83,6 +83,7 @@ def _plan() -> ResolvedPlan:
             "arc_g0_engineering_global": "test",
             "arc_g18_any_global": "test",
         },
+        grants={},
         plan_source_path=Path("/dev/null"),
         map_source_path=Path("/dev/null"),
     )
@@ -453,7 +454,9 @@ def test_mass_orphan_purge_is_refused(fs) -> None:
                              full=True, dry_run=False)
 
     assert summary.purge_refused_reason is not None
-    assert "REFUSING to purge" in summary.purge_refused_reason
+    assert "REFUSING to remove passages" in summary.purge_refused_reason
+    assert "gone from disk" in summary.purge_refused_reason
+    assert "--expect-removals" in summary.purge_refused_reason
     assert summary.files_deleted == 0
     # Nothing deleted anywhere: not from Qdrant, not from state.
     qdrant.delete_points_by_source_path.assert_not_called()
@@ -950,3 +953,211 @@ def test_a_dry_run_does_not_even_clear_a_stale_error(fs) -> None:
 
     after = state.get_file(str(f.resolve()))
     assert after is not None and after.last_error is None
+
+
+# ── Taking access away takes it away in search ─────────────────────────────
+
+
+def _indexed(fs, name: str = "shared.pdf", group: str = "group_a"):
+    """Index one file under `group`, and return its path."""
+    cfg, plan, state, root = fs
+    f = _write(root / name, "content")
+    with patch("ingstr.pipeline.classify", return_value=group), \
+         patch("ingstr.pipeline.parse_file", return_value=["el"]), \
+         patch("ingstr.pipeline.chunk_elements", return_value=[Chunk("c", 0, 1)]):
+        run_ingest(cfg, plan, state=state, embedder=_mock_embedder(),
+                   qdrant=_mock_qdrant(), full=False, dry_run=False)
+    return f
+
+
+def _lose_access_for(name: str):
+    """A classify stub that refuses one file and classifies the rest."""
+    def _classify(path, _plan, _org, **_kwargs):
+        if path.name == name:
+            raise UnclassifiableFile(path, gid=65534)
+        return "group_a"
+    return _classify
+
+
+def test_a_file_that_can_no_longer_be_classified_loses_its_passages(fs) -> None:
+    """The ruling: taking access away must take it away in search.
+
+    Before this, such a file became a per-file error and its passages stayed
+    in Qdrant under the old group, indefinitely. Nothing removed them: the
+    file is still on disk so it is not an orphan, and it never reaches the
+    indexing path so nothing overwrites it. Withdrawing a grant would have
+    left every passage of every file in it findable by the revoked group.
+    """
+    cfg, plan, state, root = fs
+    target = _indexed(fs, "shared.pdf")
+    for i in range(3):
+        _indexed(fs, f"other{i}.pdf")
+    qdrant = _mock_qdrant()
+
+    with patch("ingstr.pipeline.classify", side_effect=_lose_access_for("shared.pdf")), \
+         patch("ingstr.pipeline.parse_file", return_value=["el"]), \
+         patch("ingstr.pipeline.chunk_elements", return_value=[Chunk("c", 0, 1)]):
+        summary = run_ingest(cfg, plan, state=state, embedder=_mock_embedder(),
+                             qdrant=qdrant, full=False, dry_run=False)
+
+    assert summary.passages_removed_lost_access == 1
+    qdrant.delete_points_by_source_path.assert_called_once_with(str(target.resolve()))
+    assert state.get_file(str(target.resolve())) is None
+
+
+def test_removal_happens_in_an_ordinary_run_not_only_in_full(fs) -> None:
+    """A grant is withdrawn in the plan, not on disk. Waiting for 03:00 to
+    act on it is waiting with the access still granted."""
+    cfg, plan, state, root = fs
+    _indexed(fs, "shared.pdf")
+    for i in range(3):
+        _indexed(fs, f"other{i}.pdf")
+    qdrant = _mock_qdrant()
+
+    with patch("ingstr.pipeline.classify", side_effect=_lose_access_for("shared.pdf")), \
+         patch("ingstr.pipeline.parse_file", return_value=["el"]), \
+         patch("ingstr.pipeline.chunk_elements", return_value=[Chunk("c", 0, 1)]):
+        summary = run_ingest(cfg, plan, state=state, embedder=_mock_embedder(),
+                             qdrant=qdrant, full=False, dry_run=False)
+
+    assert summary.passages_removed_lost_access == 1
+
+
+def test_a_file_with_no_passages_is_not_counted_as_a_removal(fs) -> None:
+    cfg, plan, state, root = fs
+    f = _write(root / "never.pdf")
+    qdrant = _mock_qdrant()
+
+    with patch(
+        "ingstr.pipeline.classify", side_effect=UnclassifiableFile(f, gid=65534)
+    ):
+        summary = run_ingest(cfg, plan, state=state, embedder=_mock_embedder(),
+                             qdrant=qdrant, full=False, dry_run=False)
+
+    assert summary.passages_removed_lost_access == 0
+    qdrant.delete_points_by_source_path.assert_not_called()
+
+
+def test_a_mass_loss_of_access_is_refused_by_the_same_guard(fs) -> None:
+    """A plan read from a half-written file could re-classify everything at
+    once — the same accident as a broken mount, wearing different clothes. So
+    lost access counts against the same threshold, and a refusal removes
+    NOTHING rather than stopping half way."""
+    cfg, plan, state, root = fs
+    files = [_indexed(fs, f"f{i}.pdf") for i in range(4)]
+    qdrant = _mock_qdrant()
+
+    with patch(
+        "ingstr.pipeline.classify",
+        side_effect=UnclassifiableFile(files[0], gid=65534),
+    ):
+        summary = run_ingest(cfg, plan, state=state, embedder=_mock_embedder(),
+                             qdrant=qdrant, full=False, dry_run=False)
+
+    assert summary.purge_refused_reason is not None
+    qdrant.delete_points_by_source_path.assert_not_called()
+    # The counts are reported so an operator can act on them.
+    assert summary.passages_removed_lost_access == 4
+    assert summary.passages_removed_gone == 0
+
+
+def test_a_declared_number_lets_an_intended_mass_removal_through(fs) -> None:
+    """One declared way, and it cannot be typed from habit: the number has to
+    come from a dry run."""
+    cfg, plan, state, root = fs
+    files = [_indexed(fs, f"f{i}.pdf") for i in range(4)]
+    qdrant = _mock_qdrant()
+
+    with patch(
+        "ingstr.pipeline.classify",
+        side_effect=UnclassifiableFile(files[0], gid=65534),
+    ):
+        summary = run_ingest(cfg, plan, state=state, embedder=_mock_embedder(),
+                             qdrant=qdrant, full=False, dry_run=False,
+                             expect_removals=4)
+
+    assert summary.purge_refused_reason is None
+    assert summary.passages_removed_lost_access == 4
+    assert qdrant.delete_points_by_source_path.call_count == 4
+
+
+def test_a_declared_number_that_is_too_small_still_refuses(fs) -> None:
+    """The declaration says what the operator expected. If the world turned
+    out otherwise, that is exactly when not to delete."""
+    cfg, plan, state, root = fs
+    [_indexed(fs, f"f{i}.pdf") for i in range(4)]
+    qdrant = _mock_qdrant()
+
+    with patch(
+        "ingstr.pipeline.classify",
+        side_effect=UnclassifiableFile(Path("/x"), gid=65534),
+    ):
+        summary = run_ingest(cfg, plan, state=state, embedder=_mock_embedder(),
+                             qdrant=qdrant, full=False, dry_run=False,
+                             expect_removals=2)
+
+    assert summary.purge_refused_reason is not None
+    qdrant.delete_points_by_source_path.assert_not_called()
+
+
+def test_a_dry_run_reports_what_it_would_remove_and_removes_nothing(fs) -> None:
+    """Where the number for --expect-removals comes from."""
+    cfg, plan, state, root = fs
+    target = _indexed(fs, "shared.pdf")
+    for i in range(3):
+        _indexed(fs, f"other{i}.pdf")
+    qdrant = _mock_qdrant()
+
+    with patch("ingstr.pipeline.classify", side_effect=_lose_access_for("shared.pdf")), \
+         patch("ingstr.pipeline.parse_file", return_value=["el"]), \
+         patch("ingstr.pipeline.chunk_elements", return_value=[Chunk("c", 0, 1)]):
+        summary = run_ingest(cfg, plan, state=state, embedder=_mock_embedder(),
+                             qdrant=qdrant, full=False, dry_run=True)
+
+    assert summary.passages_removed_lost_access == 1
+    qdrant.delete_points_by_source_path.assert_not_called()
+    assert state.get_file(str(target.resolve())) is not None
+
+
+def test_a_clean_full_run_clears_an_earlier_refusal(fs) -> None:
+    """arch's fault at c3b5a30 (hub #14020), and it is a regression of the
+    v0.2.1 fix.
+
+    The case: the mount breaks, the nightly run refuses. The mount comes back,
+    the next nightly run finds nothing to remove — and if that run writes no
+    record of having reached the removal step, `ingstr stats` keeps printing
+    REMOVAL REFUSED until some later run happens to delete a file. A full run
+    that is not a dry run ALWAYS reaches the step, including when there is
+    nothing to do there.
+    """
+    cfg, plan, state, root = fs
+    _write(root / "a.pdf")
+    embedder, qdrant = _mock_embedder(), _mock_qdrant()
+
+    with patch("ingstr.pipeline.classify", return_value="group_a"), \
+         patch("ingstr.pipeline.parse_file", return_value=["el"]), \
+         patch("ingstr.pipeline.chunk_elements", return_value=[Chunk("c", 0, 1)]):
+        summary = run_ingest(cfg, plan, state=state, embedder=embedder,
+                             qdrant=qdrant, full=True, dry_run=False)
+
+    assert summary.reached_removal_step, (
+        "a full run with nothing to remove still reached the removal step, "
+        "and must say so or a refusal can never be cleared"
+    )
+    assert summary.purge_refused_reason is None
+
+
+def test_an_ordinary_run_with_nothing_to_remove_says_nothing(fs) -> None:
+    """The other way round: an ordinary run that removed nothing has no
+    opinion about whether a removal is outstanding, and must not clear one."""
+    cfg, plan, state, root = fs
+    _write(root / "a.pdf")
+    embedder, qdrant = _mock_embedder(), _mock_qdrant()
+
+    with patch("ingstr.pipeline.classify", return_value="group_a"), \
+         patch("ingstr.pipeline.parse_file", return_value=["el"]), \
+         patch("ingstr.pipeline.chunk_elements", return_value=[Chunk("c", 0, 1)]):
+        summary = run_ingest(cfg, plan, state=state, embedder=embedder,
+                             qdrant=qdrant, full=False, dry_run=False)
+
+    assert not summary.reached_removal_step

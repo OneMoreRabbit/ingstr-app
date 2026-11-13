@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "ingstr"
-version = "0.2.1"
+version = "0.2.2"
 description = "Document ingestion pipeline that walks a filesystem tree, parses + chunks documents, embeds via Ollama, and upserts into Qdrant with RBAC classification metadata."
 readme = "README.md"
 requires-python = ">=3.11"
@@ -31,8 +31,17 @@ dependencies = [
     # only loads if its extra is installed. Without these, .pdf/.docx/.pptx
     # parsing fails at runtime with "dependencies not installed". We pick the
     # extras Ingstr's parsers map references in config.example.yml. Matches
-    # the rule "format support is explicit, not implicit". Excluded:
-    # [local-inference] (multi-GB ML stack — image-only PDFs / OCR not v0.1).
+    # the rule "format support is explicit, not implicit".
+    #
+    # WHAT THIS ACTUALLY PULLS IN, measured 2026-11-13 and stated because the
+    # comment here used to imply otherwise: [pdf] brings
+    # `unstructured-inference`, and with it torch, torchvision, the CUDA
+    # runtime packages, transformers, timm and onnxruntime. THE IMAGE IS
+    # ABOUT 3.75 GB COMPRESSED and has been since v0.1.0. Naming
+    # [local-inference] as "excluded" was true and misleading: the heavy
+    # stack arrives anyway, by another door. Anyone sizing a pull, or
+    # costing layout-aware reading, should start from 3.75 GB rather than
+    # from the idea that this image is slim.
     "unstructured[pdf,docx,pptx,xlsx,md,html]>=0.14,<1.0",
     # spaCy + NLTK: used by `unstructured` for sentence segmentation, POS
     # tagging, and chunk_by_title. They are NOT pulled in by the per-format

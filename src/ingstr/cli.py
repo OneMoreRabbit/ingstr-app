@@ -60,6 +60,19 @@ def ingest(
     org: OrgOption = None,
     full: Annotated[bool, typer.Option("--full", help="Force a complete re-walk.")] = False,
     dry_run: Annotated[bool, typer.Option("--dry-run", help="Plan but do not write.")] = False,
+    expect_removals: Annotated[
+        int | None,
+        typer.Option(
+            "--expect-removals",
+            help=(
+                "Allow this many FILES to have their passages removed in one "
+                "run, when the guard would otherwise refuse. The number is "
+                "files, and it is the number a --dry-run prints. Never set "
+                "this in a timer unit: it is typed by hand, for one run, by "
+                "someone who has looked."
+            ),
+        ),
+    ] = None,
 ) -> None:
     """Walk one org's tree and ingest changed files."""
     whole = _load_or_exit(config)
@@ -68,6 +81,7 @@ def ingest(
     log = structlog.get_logger("ingstr.ingest").bind(org=cfg.org)
 
     plan = _load_plan_or_exit(cfg)
+    _require_plan_path_if_granting(cfg, plan)
     api_key = _read_api_key_or_exit(cfg)
 
     mode = "full" if full else "incremental"
@@ -99,6 +113,7 @@ def ingest(
                     qdrant=qdrant,
                     full=full,
                     dry_run=dry_run,
+                    expect_removals=expect_removals,
                 )
             except UpstreamUnavailable as e:
                 exit_code = _EXIT_UPSTREAM
@@ -120,8 +135,31 @@ def ingest(
             # deletions were withheld. ADR-0010 §6 requires it be non-zero —
             # exiting 0 here would let a broken mount read as a quiet day, which
             # is the failure the guard exists to make loud.
+            if dry_run and (
+                summary.passages_removed_gone
+                or summary.passages_removed_lost_access
+            ):
+                # Counts only, never paths: a path is org data and this is
+                # otter's journal. This is where the number for
+                # --expect-removals comes from.
+                typer.echo(
+                    f"would remove passages for "
+                    f"{summary.passages_removed_gone} file(s) gone from disk "
+                    f"and {summary.passages_removed_lost_access} file(s) that "
+                    "can no longer be classified"
+                )
             if summary.purge_refused_reason is not None:
                 typer.echo(summary.purge_refused_reason, err=True)
+                typer.echo(
+                    f"nothing was removed: {summary.passages_removed_gone} "
+                    f"file(s) gone from disk and "
+                    f"{summary.passages_removed_lost_access} file(s) that can "
+                    "no longer be classified were left in place. Until this "
+                    "is cleared, passages of files whose access was taken "
+                    "away can still be found. Run with --dry-run to see the "
+                    "counts, then --expect-removals <n> to allow it.",
+                    err=True,
+                )
                 exit_code = _EXIT_PARTIAL
             else:
                 exit_code = _EXIT_PARTIAL if summary.files_errored > 0 else _EXIT_OK
@@ -184,13 +222,18 @@ def stats(config: ConfigOption = DEFAULT_CONFIG_PATH, org: OrgOption = None) -> 
         # and NOT printed once a later run has done the removal, because a
         # warning that never clears is one nobody reads.
         typer.echo(
-            f"REMOVAL REFUSED:    run {refused.run_id} at {refused.finished_at} — "
-            f"{refused.purge_refused_reason}"
+            f"REMOVAL REFUSED:    run {refused.run_id} at {refused.finished_at}"
+        )
+        typer.echo(
+            f"                    {refused.gone_count or 0} file(s) gone from "
+            f"disk, {refused.lost_access_count or 0} file(s) that can no "
+            "longer be classified"
         )
         typer.echo(
             "                    until this is cleared, passages of files whose "
             "access was taken away can still be found"
         )
+        typer.echo(f"                    {refused.purge_refused_reason}")
     typer.echo(f"last successful:    {_run_summary(last_success)}")
     typer.echo(f"last incremental:   {_run_summary(last_incremental)}")
     typer.echo(f"last full:          {_run_summary(last_full)}")
@@ -216,6 +259,48 @@ def health(config: ConfigOption = DEFAULT_CONFIG_PATH, org: OrgOption = None) ->
         # the check above reports it. What is worth reporting here is a plan
         # that parses and gives this org nothing, which reads as a quiet
         # success otherwise.
+        if plan.grants:
+            # A WRONG plan_path is silent: it matches no grant, and every
+            # granted file reads as unclassifiable exactly as it did before.
+            # So report how many of the plan's granted folders actually lie
+            # under the declared path. Zero, with grants present, is the
+            # signature of a wrong value — the one thing nothing else says.
+            under = (
+                [p for p in plan.grants if p.startswith(cfg.source.plan_path)]
+                if cfg.source.plan_path is not None
+                else []
+            )
+            if cfg.source.plan_path is None:
+                detail = (
+                    f"{len(plan.grants)} granted folder(s); source.plan_path is "
+                    "not declared — no granted file can be matched"
+                )
+            elif not under:
+                # NOT a failure. One plan serves every org, so an org with no
+                # access rule of its own legitimately has none under its path
+                # — and failing there would be a check that fires when
+                # nothing is wrong, which is how a check stops being read
+                # (constitution §9). A wrong plan_path looks the same from
+                # here, so this is said as a NOTE and kept distinct from the
+                # failures above it: not declared is a failure; declared and
+                # matching nothing is worth a look.
+                detail = (
+                    f"note: none of the plan's {len(plan.grants)} granted "
+                    f"folder(s) lie under source.plan_path="
+                    f"{cfg.source.plan_path!r}. Expected when this org has no "
+                    "access rule of its own; otherwise the value is wrong, "
+                    "and a wrong one matches nothing silently"
+                )
+            else:
+                detail = (
+                    f"{len(under)} of {len(plan.grants)} granted folder(s) lie "
+                    f"under source.plan_path={cfg.source.plan_path!r}"
+                )
+            # Only the undeclared case fails; "declared, matched nothing" is
+            # reported and passes.
+            checks.append(
+                ("plan.grants", cfg.source.plan_path is not None, detail)
+            )
         org_gids = plan.gids_for_org(cfg.org)
         checks.append(
             (
@@ -302,6 +387,32 @@ def _load_or_exit(config_path: Path) -> IngstrConfig:
         raise typer.Exit(code=_EXIT_CONFIG) from e
 
 
+def _require_plan_path_if_granting(cfg: OrgView, plan: ResolvedPlan) -> None:
+    """Stop before the walk if the plan grants and nothing says where we are.
+
+    The plan writes its grant paths relative to a root on beaver; this
+    container sees its own mount point. Without `source.plan_path` no file can
+    be matched against any grant — and the failure is not an error, it is
+    SILENCE: every granted file simply reads as unclassifiable, the run exits
+    3, and a folder the operator believed he had shared stays unsearchable
+    with nothing saying why.
+
+    So the run stops, and says what to add (constitution §11).
+    """
+    if plan.grants and cfg.source.plan_path is None:
+        granted = ", ".join(sorted(plan.grants)[:3])
+        typer.echo(
+            f"config error: the plan grants access to {len(plan.grants)} "
+            f"folder(s) (for example {granted}) and this org does not declare "
+            "source.plan_path, so none of their files can be matched. Add "
+            "source.plan_path to this org: where its source.root sits beneath "
+            "the plan's acl root, written as the plan writes paths "
+            "(e.g. 'arc/drive/').",
+            err=True,
+        )
+        raise typer.Exit(code=_EXIT_CONFIG)
+
+
 def _load_plan_or_exit(cfg: OrgView) -> ResolvedPlan:
     try:
         return load_plan(cfg.plan.compiled_plan_path, cfg.plan.group_gid_map_path)
@@ -340,6 +451,8 @@ def _finalise_run(
         exit_code=exit_code,
         purge_refused_reason=summary.purge_refused_reason if summary else None,
         reached_removal_step=summary.reached_removal_step if summary else False,
+        gone_count=summary.passages_removed_gone if summary else 0,
+        lost_access_count=summary.passages_removed_lost_access if summary else 0,
     )
 
 

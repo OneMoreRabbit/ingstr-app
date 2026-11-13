@@ -85,7 +85,13 @@ CREATE TABLE IF NOT EXISTS file_failures (
 -- no row and therefore neither raises nor clears anything.
 CREATE TABLE IF NOT EXISTS run_removals (
     run_id         TEXT PRIMARY KEY,
-    refused_reason TEXT
+    refused_reason TEXT,
+    -- The two kinds, kept apart. An operator reading a refusal has to know
+    -- which it is: a file gone from disk is a deletion or a broken mount; a
+    -- file that can no longer be classified is access withdrawn. Different
+    -- causes, different remedies, and one total hides both.
+    gone_count         INTEGER,
+    lost_access_count  INTEGER
 );
 """
 
@@ -130,6 +136,10 @@ class RunRecord:
     files_errored: int | None
     chunks_written: int | None
     exit_code: int | None
+    #: The two kinds of removal this run made, or would have made when it
+    #: refused. None on runs that never reached the removal step.
+    gone_count: int | None = None
+    lost_access_count: int | None = None
     #: Set when this run refused to remove passages because too much had
     #: vanished at once. Kept so the refusal can be asked about later: until
     #: it is cleared, passages of files whose access was taken away can still
@@ -144,13 +154,46 @@ class StateDB:
     (ingest is sequential and per-file; no transactional batching required).
     """
 
+    #: Columns added to a table a PREVIOUS ingstr version already created.
+    #: `CREATE TABLE IF NOT EXISTS` creates a missing table and does NOTHING
+    #: to an existing one, so these have to be added in place or every query
+    #: naming them fails on a database an older version made.
+    #:
+    #: Only ever on tables NO OLDER IMAGE READS. v0.2.1 created `run_removals`
+    #: and selects named columns from it, never `*`, so adding to it breaks
+    #: nothing going back. Adding to `files` or `runs` WOULD break v0.1.1,
+    #: which builds its record from `SELECT *` — that is why the v0.2.1 state
+    #: went into new tables in the first place, and the rule still holds.
+    _ADDED_COLUMNS: tuple[tuple[str, str, str], ...] = (
+        ("run_removals", "gone_count", "INTEGER"),
+        ("run_removals", "lost_access_count", "INTEGER"),
+    )
+
     def __init__(self, db_path: Path) -> None:
         self.db_path = db_path
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self._conn = sqlite3.connect(str(db_path))
         self._conn.row_factory = sqlite3.Row
         self._conn.executescript(_SCHEMA)
+        self._add_missing_columns()
         self._conn.commit()
+
+    def _add_missing_columns(self) -> None:
+        """Add columns to tables an earlier version of ingstr created.
+
+        Additive only: existing rows read NULL, which every caller already
+        handles — a refusal recorded by v0.2.1 has no counts, and is shown
+        without them rather than not shown.
+        """
+        for table, column, declaration in self._ADDED_COLUMNS:
+            existing = {
+                row["name"]
+                for row in self._conn.execute(f"PRAGMA table_info({table})")
+            }
+            if column not in existing:
+                self._conn.execute(
+                    f"ALTER TABLE {table} ADD COLUMN {column} {declaration}"
+                )
 
     def close(self) -> None:
         self._conn.close()
@@ -327,7 +370,10 @@ class StateDB:
         with self._cursor() as cur:
             row = cur.execute(
                 f"""
-                SELECT runs.*, run_removals.refused_reason AS purge_refused_reason
+                SELECT runs.*,
+                       run_removals.refused_reason AS purge_refused_reason,
+                       run_removals.gone_count,
+                       run_removals.lost_access_count
                 FROM runs
                 LEFT JOIN run_removals ON run_removals.run_id = CAST(runs.run_id AS TEXT)
                 WHERE {where} ORDER BY runs.run_id DESC LIMIT 1
@@ -348,7 +394,10 @@ class StateDB:
         with self._cursor() as cur:
             row = cur.execute(
                 """
-                SELECT runs.*, run_removals.refused_reason AS purge_refused_reason
+                SELECT runs.*,
+                       run_removals.refused_reason AS purge_refused_reason,
+                       run_removals.gone_count,
+                       run_removals.lost_access_count
                 FROM run_removals
                 JOIN runs ON CAST(runs.run_id AS TEXT) = run_removals.run_id
                 ORDER BY runs.run_id DESC LIMIT 1
@@ -371,6 +420,8 @@ class StateDB:
         exit_code: int,
         purge_refused_reason: str | None = None,
         reached_removal_step: bool = False,
+        gone_count: int = 0,
+        lost_access_count: int = 0,
     ) -> None:
         with self._cursor() as cur:
             cur.execute(
@@ -398,8 +449,14 @@ class StateDB:
             )
             if reached_removal_step:
                 cur.execute(
-                    "INSERT INTO run_removals (run_id, refused_reason) VALUES (?, ?) "
-                    "ON CONFLICT(run_id) DO UPDATE SET "
-                    "refused_reason = excluded.refused_reason",
-                    (str(run_id), purge_refused_reason),
+                    """
+                    INSERT INTO run_removals
+                        (run_id, refused_reason, gone_count, lost_access_count)
+                    VALUES (?, ?, ?, ?)
+                    ON CONFLICT(run_id) DO UPDATE SET
+                        refused_reason    = excluded.refused_reason,
+                        gone_count        = excluded.gone_count,
+                        lost_access_count = excluded.lost_access_count
+                    """,
+                    (str(run_id), purge_refused_reason, gone_count, lost_access_count),
                 )

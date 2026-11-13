@@ -63,3 +63,26 @@ class RecordedFileError(IngstrError):
 
     def __init__(self, message: str) -> None:
         super().__init__(message)
+
+
+class AmbiguousGrant(IngstrError):
+    """A file is under a granted path that carries more than one group.
+
+    The contract permits it: validation rejects only a duplicate of the same
+    path and the same tuple, so one folder may legitimately be shared with two
+    different groups. A passage carries exactly one `classification_group`, so
+    there is no answer ingstr could give that is not a choice between two
+    audiences — and choosing would hand one of them access the plan does not
+    state. Refused and reported, for whoever wrote the grants to resolve.
+    """
+
+    def __init__(self, path: Path, grant_path: str, groups: frozenset[str]) -> None:
+        listed = ", ".join(sorted(groups))
+        super().__init__(
+            f"{path}: the granted path {grant_path!r} carries more than one "
+            f"group ({listed}); a passage has one group, so this is not "
+            "ingstr's to choose"
+        )
+        self.path = path
+        self.grant_path = grant_path
+        self.groups = groups
