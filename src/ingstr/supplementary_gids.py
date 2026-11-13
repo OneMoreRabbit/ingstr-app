@@ -34,16 +34,14 @@ from .plan import load_plan
 def gids_for_run(config_path: Path, org: str | None) -> list[int]:
     """The sorted gids this run should hold, narrowed to its own org.
 
-    Falls back to every gid in the map only when the plan carries no
-    `groups[]` section at all — a plan below contract 0.11, where no group's
-    org is stated and narrowing is therefore not possible. That is reported by
-    `ingstr health`; it is not silently equivalent to the narrowed case.
+    A plan without `groups[]` raises: see `plan._load_group_orgs`. There is
+    deliberately no fallback to every gid in the map — that is the behaviour
+    this release exists to end, and a fallback is exactly what nobody would
+    have noticed.
     """
     cfg = load_config(config_path)
     view = cfg.for_org(org)
     plan = load_plan(view.plan.compiled_plan_path, view.plan.group_gid_map_path)
-    if not plan.group_org:
-        return sorted(plan.gid_to_group)
     return sorted(plan.gids_for_org(view.org))
 
 

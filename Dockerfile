@@ -29,13 +29,19 @@ RUN apt-get update \
  && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /build
-COPY pyproject.toml README.md LICENSE ./
+COPY pyproject.toml constraints.txt README.md LICENSE ./
 COPY src ./src
 
 # Install into an isolated venv that the runtime stage will copy verbatim.
+#
+# -c constraints.txt pins every transitive version. pyproject.toml's ranges
+# stay as the compatibility statement; this decides what is actually
+# installed, so the same source builds the same image on any day. Without it
+# v0.1.1 picked up a numba that needs a writable cache directory while v0.1.0
+# had not — a change nobody made, which took out every PDF in the ARC restore.
 RUN python -m venv /opt/venv \
  && /opt/venv/bin/pip install --upgrade pip \
- && /opt/venv/bin/pip install .
+ && /opt/venv/bin/pip install . -c constraints.txt
 
 # Pre-download NLP models that `unstructured` lazy-loads at parse time.
 # Doing this at build time (as root) bakes the data into /opt/venv so the
@@ -63,11 +69,27 @@ RUN mkdir -p /opt/venv/share/nltk_data \
 # ────────────────────────────────────────────────────────────────────────────
 FROM python:${PYTHON_VERSION}-slim AS runtime
 
+# The entrypoint drops privileges with setpriv, which changes the uid and the
+# groups and NOT the environment — so HOME stayed /root while the process ran
+# as `ingstr`, and every library that caches under HOME tried to write into a
+# directory it cannot. That is not a theory: it took out all 339 PDFs in the
+# ARC restore on 2026-11-13. numba (via unstructured's PDF layout analysis)
+# failed with "cannot cache function 'projection_by_bboxes': no locator
+# available", which names neither HOME nor permissions, so the cause is not
+# visible from the error.
+#
+# These are set in the IMAGE, not in a deployment, because they are a property
+# of how this image drops privileges. A deployment that has to know about
+# numba to parse a PDF is a deployment that will one day not know.
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     PATH="/opt/venv/bin:${PATH}" \
     INGSTR_CONFIG=/etc/ingstr/config.yml \
-    NLTK_DATA=/opt/venv/share/nltk_data
+    NLTK_DATA=/opt/venv/share/nltk_data \
+    HOME=/home/ingstr \
+    XDG_CACHE_HOME=/home/ingstr/.cache \
+    NUMBA_CACHE_DIR=/home/ingstr/.cache/numba \
+    MPLCONFIGDIR=/home/ingstr/.cache/matplotlib
 
 # Runtime system deps:
 #   libmagic1       — unstructured uses libmagic for file-type sniffing
@@ -111,8 +133,31 @@ COPY --from=builder /opt/venv /opt/venv
 RUN mkdir -p /var/lib/ingstr \
  && chown -R ingstr:ingstr /var/lib/ingstr
 
+# The cache directories named in ENV above, owned by the user that will write
+# them. Created here rather than left to the libraries: a library that cannot
+# create its cache directory usually reports the failure as something else.
+RUN mkdir -p /home/ingstr/.cache/numba /home/ingstr/.cache/matplotlib \
+ && chown -R ingstr:ingstr /home/ingstr
+
 COPY docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
 RUN chmod +x /usr/local/bin/docker-entrypoint.sh
+
+# Prove, at build time and AS THE DROPPED USER, that a PDF parses.
+#
+# This is the test that would have caught the 2026-11-13 failure, and it is in
+# the image rather than in CI on purpose: the fault was not in the code, it
+# was in what the environment let the code write, so only something running in
+# the built image as `ingstr` can see it. A build that cannot parse a PDF now
+# fails instead of shipping.
+#
+# The fixture is generated here rather than committed: a few hundred bytes of
+# PDF that nobody has to review, and it exercises the real partition path.
+COPY scripts/image-selftest.py /usr/local/lib/ingstr-image-selftest.py
+RUN set -eu; \
+    install -d -o ingstr -g ingstr /tmp/ingstr-selftest; \
+    setpriv --reuid=ingstr --regid=ingstr --clear-groups \
+        /opt/venv/bin/python /usr/local/lib/ingstr-image-selftest.py; \
+    rm -rf /tmp/ingstr-selftest
 
 # tini reaps zombies and forwards signals; entrypoint handles privilege drop;
 # `ingstr` is the fixed first arg so callers pass only the subcommand:

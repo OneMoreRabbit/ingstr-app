@@ -69,15 +69,19 @@ def test_only_the_org_s_own_gids(tmp_path: Path) -> None:
     assert gids_for_run(cfg, "job") == [1200]
 
 
-def test_without_groups_section_every_gid_is_kept(tmp_path: Path) -> None:
-    """A plan below contract 0.11 states no org, so narrowing is not possible.
-    Keeping every gid preserves today's behaviour rather than silently reading
-    nothing; `ingstr health` reports that it was not narrowed."""
+def test_without_groups_section_the_run_is_refused(tmp_path: Path, capsys) -> None:
+    """v0.2.0 requires contract 0.11.
+
+    The rejected alternative was to keep every gid and report it — which is
+    the estate's current plan, so that fallback is what would actually have
+    run, and a fallback nobody notices is how it would have stayed.
+    """
     cfg = _write(
         tmp_path,
         "required_groups:\n- arc_g0_engineering_global\n- job_g1_personal_global\n",
     )
-    assert gids_for_run(cfg, "arc") == [1003, 1200]
+    assert main([str(cfg), "arc"]) == 1
+    assert "no 'groups' section" in capsys.readouterr().err
 
 
 def test_main_prints_a_comma_list(tmp_path: Path, capsys) -> None:

@@ -115,9 +115,16 @@ def _load_group_orgs(path: Path, required_groups: set[str]) -> dict[str, str]:
     """Read each group's org from the plan's `groups[]` section.
 
     `compiled-rbac-plan` 0.11 states a group's org outright so a consumer does
-    not parse it out of the group name (constitution §10). The section is
-    additive, so a plan without it is not an error here — a run that needs the
-    orgs says so itself, with a message naming the contract version.
+    not parse it out of the group name (constitution §10).
+
+    **ingstr v0.2.0 requires the section.** It is additive in the contract, so
+    an older plan is legal there — but a run narrows its group ids by org, and
+    without the section it cannot. The alternative considered and rejected was
+    to fall back to every group id in the estate-wide map and report it: that
+    is the behaviour v0.2.0 exists to end, it is what the estate's current
+    plan would have produced, and a fallback nobody notices is how it would
+    have stayed. Arch ruled it an error (hub #13871); the estate rolls
+    rbac-compiler v0.7.3 first.
 
     Guarantee checked: `groups[].name` equals `required_groups`, element for
     element. A plan that carries the section but disagrees with its own
@@ -127,7 +134,12 @@ def _load_group_orgs(path: Path, required_groups: set[str]) -> dict[str, str]:
     raw = _read_yaml(path)
     rows = raw.get("groups")
     if rows is None:
-        return {}
+        raise PlanError(
+            f"{path}: no 'groups' section. ingstr v0.2.0 narrows a run's group "
+            "ids to its own org and cannot do that without it; it arrived in "
+            "compiled-rbac-plan 0.11 (rbac-compiler v0.7.3). Upgrade the "
+            "compiler, or run ingstr v0.1.1."
+        )
     if not isinstance(rows, list):
         raise PlanError(f"{path}: 'groups' must be a list of rows (compiled-rbac-plan 0.11)")
     out: dict[str, str] = {}

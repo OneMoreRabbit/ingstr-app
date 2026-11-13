@@ -43,7 +43,11 @@ def _cfg_file(tmp_path: Path) -> Path:
     root = tmp_path / "src"
     root.mkdir()
     plan = tmp_path / "plan.yml"
-    plan.write_text("required_groups:\n- arc_g0_engineering_global\n")
+    plan.write_text(
+        "required_groups:\n- arc_g0_engineering_global\n"
+        "groups:\n- {name: arc_g0_engineering_global, org: test, grade: g0,\n"
+        "   vertical: engineering, scope: global}\n"
+    )
     gid_map = tmp_path / "gid_map.yml"
     gid_map.write_text("groups:\n  arc_g0_engineering_global: 1003\n")
     db = tmp_path / "state.db"
@@ -253,7 +257,11 @@ def _two_org_cfg_file(tmp_path: Path) -> Path:
     root = tmp_path / "src"
     root.mkdir()
     plan = tmp_path / "plan.yml"
-    plan.write_text("required_groups:\n- arc_g0_engineering_global\n")
+    plan.write_text(
+        "required_groups:\n- arc_g0_engineering_global\n"
+        "groups:\n- {name: arc_g0_engineering_global, org: test, grade: g0,\n"
+        "   vertical: engineering, scope: global}\n"
+    )
     gid_map = tmp_path / "gid_map.yml"
     gid_map.write_text("groups:\n  arc_g0_engineering_global: 1003\n")
     cfg = tmp_path / "config.yml"

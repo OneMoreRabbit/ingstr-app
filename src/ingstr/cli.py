@@ -196,29 +196,19 @@ def health(config: ConfigOption = DEFAULT_CONFIG_PATH, org: OrgOption = None) ->
     try:
         plan = load_plan(cfg.plan.compiled_plan_path, cfg.plan.group_gid_map_path)
         checks.append(("plan", True, f"{len(plan.gid_to_group)} groups"))
+        # A plan without `groups[]` never reaches here — load_plan raises, and
+        # the check above reports it. What is worth reporting here is a plan
+        # that parses and gives this org nothing, which reads as a quiet
+        # success otherwise.
         org_gids = plan.gids_for_org(cfg.org)
-        if plan.group_org:
-            checks.append(
-                (
-                    "plan.groups",
-                    bool(org_gids),
-                    f"{len(org_gids)} group(s) for org {cfg.org!r}"
-                    + ("" if org_gids else " — this run would read nothing"),
-                )
+        checks.append(
+            (
+                "plan.groups",
+                bool(org_gids),
+                f"{len(org_gids)} group(s) for org {cfg.org!r}"
+                + ("" if org_gids else " — this run would read nothing"),
             )
-        else:
-            # Not a failure: `groups[]` is additive in compiled-rbac-plan 0.11,
-            # and a plan without it is legal. But it is the difference between
-            # "this run reads its own org's groups" and "this run reads every
-            # group in the estate", so it is reported rather than passed over.
-            checks.append(
-                (
-                    "plan.groups",
-                    True,
-                    "absent (plan below contract 0.11) — group ids are NOT "
-                    "narrowed to this org",
-                )
-            )
+        )
     except PlanError as e:
         checks.append(("plan", False, str(e)))
 

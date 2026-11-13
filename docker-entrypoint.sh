@@ -28,14 +28,26 @@ set -euo pipefail
 
 CFG="${INGSTR_CONFIG:-/etc/ingstr/config.yml}"
 
-# Does this invocation read anything? First non-option argument decides.
+# Does this invocation read anything?
+#
+# NOTE THE SHAPE OF "$@". The image's ENTRYPOINT ends with the program name:
+#
+#   ENTRYPOINT [..., "docker-entrypoint.sh", "ingstr"]
+#
+# so a `docker compose run ingstr ingest --org arc` arrives here as
+# `ingstr ingest --org arc` — the subcommand is the SECOND word, not the
+# first. An earlier version judged the first non-option argument, decided
+# "ingstr" was not a reading command, and dropped privileges with no groups
+# at all: every run would have read nothing, everywhere.
+#
+# So this scans for a reading subcommand anywhere in the arguments rather
+# than deciding on position. Found by the arch seat before the release
+# (hub #13871).
 needs_groups() {
     local arg
     for arg in "$@"; do
         case "$arg" in
-            -*) continue ;;
             ingest|stats|health) return 0 ;;
-            *) return 1 ;;
         esac
     done
     return 1

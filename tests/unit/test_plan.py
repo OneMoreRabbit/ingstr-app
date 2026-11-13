@@ -7,6 +7,11 @@ _VALID_PLAN = """\
 required_groups:
 - arc_g0_engineering_global
 - arc_g18_any_global
+groups:
+- {name: arc_g0_engineering_global, org: arc, grade: g0,
+   vertical: engineering, scope: global}
+- {name: arc_g18_any_global, org: arc, grade: g18,
+   vertical: any, scope: global}
 """
 
 _VALID_MAP = """\
@@ -61,7 +66,13 @@ groups:
   arc_g0_engineering_global: 1003
   arc_g18_any_global: 1004
 """
-    plan_with_extra = _VALID_PLAN + "- arc_g9_finance_global\n"
+    plan_with_extra = _VALID_PLAN.replace(
+        "- arc_g18_any_global\ngroups:",
+        "- arc_g18_any_global\n- arc_g9_finance_global\ngroups:",
+    ) + (
+        "- {name: arc_g9_finance_global, org: arc, grade: g9,\n"
+        "   vertical: finance, scope: global}\n"
+    )
     with pytest.raises(PlanError, match="missing groups that compiled_plan.yml"):
         load_plan(
             tmp_yaml("compiled_plan.yml", plan_with_extra),
@@ -166,15 +177,31 @@ def test_gids_for_org_narrows_to_that_org(tmp_yaml):
     assert plan.gids_for_org("nobody") == frozenset()
 
 
-def test_plan_without_groups_section_is_not_an_error(tmp_yaml):
-    """`groups[]` is additive in 0.11; a plan below it is legal. No org is
-    known, so nothing is narrowed — reported by `ingstr health`, not guessed."""
-    plan = load_plan(
-        tmp_yaml("plan.yml", "required_groups:\n- arc_g0_engineering_global\n"),
-        tmp_yaml("map.yml", "groups:\n  arc_g0_engineering_global: 1003\n"),
-    )
-    assert plan.group_org == {}
-    assert plan.org_of_group("arc_g0_engineering_global") is None
+def test_plan_without_groups_section_is_refused(tmp_yaml):
+    """v0.2.0 requires contract 0.11.
+
+    The section is additive in the contract, so an older plan is legal there.
+    It is not legal here: a run narrows its group ids by org and cannot do it
+    without the section. Falling back to every gid in the estate-wide map is
+    the behaviour this release exists to end — and it is what the estate's
+    current plan would have produced, silently. Arch ruled it an error
+    (hub #13871).
+    """
+    with pytest.raises(PlanError, match="no 'groups' section"):
+        load_plan(
+            tmp_yaml("plan.yml", "required_groups:\n- arc_g0_engineering_global\n"),
+            tmp_yaml("map.yml", "groups:\n  arc_g0_engineering_global: 1003\n"),
+        )
+
+
+def test_the_refusal_names_what_to_do_about_it(tmp_yaml):
+    """An error that names the contract version and the compiler release is
+    actionable; "missing section" is not."""
+    with pytest.raises(PlanError, match="0.11.*v0.7.3"):
+        load_plan(
+            tmp_yaml("plan.yml", "required_groups:\n- arc_g0_engineering_global\n"),
+            tmp_yaml("map.yml", "groups:\n  arc_g0_engineering_global: 1003\n"),
+        )
 
 
 def test_groups_disagreeing_with_required_groups_is_refused(tmp_yaml):

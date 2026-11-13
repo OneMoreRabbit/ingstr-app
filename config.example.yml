@@ -25,10 +25,27 @@ orgs:
     source:
       root: /mnt/data
       follow_symlinks: false
-      exclude_patterns:                 # gitignore-style globs
+      # gitignore-style globs, and MATCHED CASE-SENSITIVELY, as gitignore
+      # does. "**/*.heic" does not exclude IMG_1.HEIC. Write both cases for
+      # anything a camera or phone produces — in the ARC tree .HEIC, .JPG
+      # and .MP4 were all tried and reported as parse failures because the
+      # patterns were lowercase.
+      exclude_patterns:
         - "**/.tmp/**"
         - "**/~$*"
         - "**/Thumbs.db"
+        - "**/*.heic"
+        - "**/*.HEIC"
+        - "**/*.jpg"
+        - "**/*.JPG"
+        - "**/*.jpeg"
+        - "**/*.JPEG"
+        - "**/*.png"
+        - "**/*.PNG"
+        - "**/*.mp4"
+        - "**/*.MP4"
+        - "**/*.mov"
+        - "**/*.MOV"
 
     # ── Where to store ───────────────────────────────────────────────
     # Per-org Qdrant collection on a per-org Qdrant container. No
