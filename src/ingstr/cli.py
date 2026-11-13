@@ -65,10 +65,11 @@ def ingest(
         typer.Option(
             "--expect-removals",
             help=(
-                "Allow up to this many passage removals in one run, when the "
-                "guard would otherwise refuse. Get the number from a "
-                "--dry-run first. Never set this in a timer unit: it is typed "
-                "by hand, for one run, by someone who has looked."
+                "Allow this many FILES to have their passages removed in one "
+                "run, when the guard would otherwise refuse. The number is "
+                "files, and it is the number a --dry-run prints. Never set "
+                "this in a timer unit: it is typed by hand, for one run, by "
+                "someone who has looked."
             ),
         ),
     ] = None,
@@ -221,13 +222,18 @@ def stats(config: ConfigOption = DEFAULT_CONFIG_PATH, org: OrgOption = None) -> 
         # and NOT printed once a later run has done the removal, because a
         # warning that never clears is one nobody reads.
         typer.echo(
-            f"REMOVAL REFUSED:    run {refused.run_id} at {refused.finished_at} — "
-            f"{refused.purge_refused_reason}"
+            f"REMOVAL REFUSED:    run {refused.run_id} at {refused.finished_at}"
+        )
+        typer.echo(
+            f"                    {refused.gone_count or 0} file(s) gone from "
+            f"disk, {refused.lost_access_count or 0} file(s) that can no "
+            "longer be classified"
         )
         typer.echo(
             "                    until this is cleared, passages of files whose "
             "access was taken away can still be found"
         )
+        typer.echo(f"                    {refused.purge_refused_reason}")
     typer.echo(f"last successful:    {_run_summary(last_success)}")
     typer.echo(f"last incremental:   {_run_summary(last_incremental)}")
     typer.echo(f"last full:          {_run_summary(last_full)}")
@@ -254,19 +260,34 @@ def health(config: ConfigOption = DEFAULT_CONFIG_PATH, org: OrgOption = None) ->
         # that parses and gives this org nothing, which reads as a quiet
         # success otherwise.
         if plan.grants:
-            checks.append(
-                (
-                    "plan.grants",
-                    cfg.source.plan_path is not None,
-                    f"{len(plan.grants)} granted folder(s); source.plan_path="
-                    f"{cfg.source.plan_path!r}"
-                    + (
-                        ""
-                        if cfg.source.plan_path is not None
-                        else " — no granted file can be matched without it"
-                    ),
-                )
+            # A WRONG plan_path is silent: it matches no grant, and every
+            # granted file reads as unclassifiable exactly as it did before.
+            # So report how many of the plan's granted folders actually lie
+            # under the declared path. Zero, with grants present, is the
+            # signature of a wrong value — the one thing nothing else says.
+            under = (
+                [p for p in plan.grants if p.startswith(cfg.source.plan_path)]
+                if cfg.source.plan_path is not None
+                else []
             )
+            if cfg.source.plan_path is None:
+                detail = (
+                    f"{len(plan.grants)} granted folder(s); source.plan_path is "
+                    "not declared — no granted file can be matched"
+                )
+            elif not under:
+                detail = (
+                    f"NONE of the plan's {len(plan.grants)} granted folder(s) "
+                    f"lie under source.plan_path={cfg.source.plan_path!r} — "
+                    "the value is probably wrong, and a wrong one matches "
+                    "nothing silently"
+                )
+            else:
+                detail = (
+                    f"{len(under)} of {len(plan.grants)} granted folder(s) lie "
+                    f"under source.plan_path={cfg.source.plan_path!r}"
+                )
+            checks.append(("plan.grants", bool(under), detail))
         org_gids = plan.gids_for_org(cfg.org)
         checks.append(
             (
@@ -417,6 +438,8 @@ def _finalise_run(
         exit_code=exit_code,
         purge_refused_reason=summary.purge_refused_reason if summary else None,
         reached_removal_step=summary.reached_removal_step if summary else False,
+        gone_count=summary.passages_removed_gone if summary else 0,
+        lost_access_count=summary.passages_removed_lost_access if summary else 0,
     )
 
 

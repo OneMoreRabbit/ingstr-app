@@ -454,7 +454,9 @@ def test_mass_orphan_purge_is_refused(fs) -> None:
                              full=True, dry_run=False)
 
     assert summary.purge_refused_reason is not None
-    assert "REFUSING to purge" in summary.purge_refused_reason
+    assert "REFUSING to remove passages" in summary.purge_refused_reason
+    assert "gone from disk" in summary.purge_refused_reason
+    assert "--expect-removals" in summary.purge_refused_reason
     assert summary.files_deleted == 0
     # Nothing deleted anywhere: not from Qdrant, not from state.
     qdrant.delete_points_by_source_path.assert_not_called()
@@ -1115,3 +1117,47 @@ def test_a_dry_run_reports_what_it_would_remove_and_removes_nothing(fs) -> None:
     assert summary.passages_removed_lost_access == 1
     qdrant.delete_points_by_source_path.assert_not_called()
     assert state.get_file(str(target.resolve())) is not None
+
+
+def test_a_clean_full_run_clears_an_earlier_refusal(fs) -> None:
+    """arch's fault at c3b5a30 (hub #14020), and it is a regression of the
+    v0.2.1 fix.
+
+    The case: the mount breaks, the nightly run refuses. The mount comes back,
+    the next nightly run finds nothing to remove — and if that run writes no
+    record of having reached the removal step, `ingstr stats` keeps printing
+    REMOVAL REFUSED until some later run happens to delete a file. A full run
+    that is not a dry run ALWAYS reaches the step, including when there is
+    nothing to do there.
+    """
+    cfg, plan, state, root = fs
+    _write(root / "a.pdf")
+    embedder, qdrant = _mock_embedder(), _mock_qdrant()
+
+    with patch("ingstr.pipeline.classify", return_value="group_a"), \
+         patch("ingstr.pipeline.parse_file", return_value=["el"]), \
+         patch("ingstr.pipeline.chunk_elements", return_value=[Chunk("c", 0, 1)]):
+        summary = run_ingest(cfg, plan, state=state, embedder=embedder,
+                             qdrant=qdrant, full=True, dry_run=False)
+
+    assert summary.reached_removal_step, (
+        "a full run with nothing to remove still reached the removal step, "
+        "and must say so or a refusal can never be cleared"
+    )
+    assert summary.purge_refused_reason is None
+
+
+def test_an_ordinary_run_with_nothing_to_remove_says_nothing(fs) -> None:
+    """The other way round: an ordinary run that removed nothing has no
+    opinion about whether a removal is outstanding, and must not clear one."""
+    cfg, plan, state, root = fs
+    _write(root / "a.pdf")
+    embedder, qdrant = _mock_embedder(), _mock_qdrant()
+
+    with patch("ingstr.pipeline.classify", return_value="group_a"), \
+         patch("ingstr.pipeline.parse_file", return_value=["el"]), \
+         patch("ingstr.pipeline.chunk_elements", return_value=[Chunk("c", 0, 1)]):
+        summary = run_ingest(cfg, plan, state=state, embedder=embedder,
+                             qdrant=qdrant, full=False, dry_run=False)
+
+    assert not summary.reached_removal_step

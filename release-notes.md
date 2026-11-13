@@ -12,7 +12,7 @@ Newest first. One entry per release tag, written in the same commit that cuts th
 tag. Plain English: a reader skimming this page should know what changed and
 whether they have to act.
 
-## v0.3.0 — 2026-11-13
+## v0.2.2 — 2026-11-13
 
 **TL;DR:** folders shared by an added ACL rather than by classification are
 now indexed, classified by the grant on the folder. And the other half, which
@@ -62,7 +62,13 @@ no longer be classified has its passages removed, in every run.
   it in a timer unit.**
 - Removal counts are reported as two numbers — files gone from disk, and
   files that can no longer be classified — and **never as paths**: a path is
-  org data and the journal is on the host.
+  org data and the journal is on the host. Both numbers are kept with a
+  refusal and shown by `ingstr stats`, because the two have different causes
+  and different remedies.
+- **`ingstr health` checks `source.plan_path` against the plan**, reporting
+  how many granted folders lie under it. A wrong value is otherwise silent:
+  it matches nothing, and every granted file reads as unclassifiable exactly
+  as it did before.
 
 ### Also
 
@@ -72,8 +78,15 @@ no longer be classified has its passages removed, in every run.
   and with it torch, the CUDA runtime, transformers and onnxruntime. The
   comment now says so.
 
+**One limit, stated rather than built around:** a grant classifies by the
+plan's path, not by the access entries on the file. A file moved into a
+granted folder keeps its old entries until the RBAC play next runs, so for
+that window search can show a passage its group cannot yet open. The window
+is the play's cadence, and closing it belongs where the ACLs are applied.
+
 **Action:** if the plan has `acl_grants`, add `source.plan_path` to each org
 before deploying — a run without it stops at startup and says what to add.
+`ingstr health` tells you whether the value you chose matches any grant.
 
 ## v0.2.1 — 2026-11-13
 

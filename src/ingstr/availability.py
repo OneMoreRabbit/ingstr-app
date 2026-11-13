@@ -288,6 +288,8 @@ def assess_purge(
     known_count: int,
     vanished_count: int,
     threshold: float = DEFAULT_PURGE_THRESHOLD,
+    gone_count: int | None = None,
+    lost_access_count: int | None = None,
 ) -> PurgeVerdict:
     """Refuse implausibly large deletions.
 
@@ -312,14 +314,29 @@ def assess_purge(
 
     share = vanished_count / known_count
     if share > threshold:
+        # The two kinds are named apart because they have different causes and
+        # different remedies: a file gone from disk is a deletion or a broken
+        # mount, while a file that can no longer be classified is access
+        # withdrawn — a changed plan, not a changed tree. One sentence about
+        # mounts would send a reader looking in the wrong place for half of it.
+        if gone_count is None and lost_access_count is None:
+            breakdown = f"{vanished_count} of {known_count} known files"
+        else:
+            breakdown = (
+                f"{gone_count or 0} file(s) gone from disk and "
+                f"{lost_access_count or 0} file(s) that can no longer be "
+                f"classified — {vanished_count} of {known_count} known files"
+            )
         return PurgeVerdict(
             False,
-            f"REFUSING to purge: {vanished_count} of {known_count} known files "
-            f"({share:.0%}) are absent this run, over the {threshold:.0%} threshold. "
-            f"This is what a broken mount looks like as well as what a real deletion "
-            f"looks like, and the two are indistinguishable from here. Re-run once the "
-            f"source is known good, or raise the threshold deliberately if the deletion "
-            f"is genuine.",
+            f"REFUSING to remove passages for {breakdown} ({share:.0%}), over "
+            f"the {threshold:.0%} threshold. Files gone from disk are what a "
+            f"broken mount looks like as well as a real deletion, and the two "
+            f"are indistinguishable from here; files that can no longer be "
+            f"classified are access being withdrawn, which a half-written plan "
+            f"also produces. NOTHING WAS REMOVED. Run with --dry-run to see "
+            f"the counts, and if they are what you intend, run once with "
+            f"--expect-removals <n>.",
         )
     return PurgeVerdict(
         True,

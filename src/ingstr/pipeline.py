@@ -237,7 +237,14 @@ def run_ingest(
     orphans = sorted(known - seen) if full else []
     lost = sorted(lost_access)
 
-    if not dry_run and (orphans or lost):
+    # A full run ALWAYS reaches the step, including when it finds nothing to
+    # remove — that is what lets a clean run clear an earlier refusal. Setting
+    # this only when there was something to remove meant: mount breaks, the
+    # nightly run refuses; mount comes back, the next nightly run finds
+    # nothing, writes no row, and `ingstr stats` keeps showing REMOVAL REFUSED
+    # until some later run happens to delete a file. That is the exact case
+    # the v0.2.1 fix was for, and this release had quietly undone it.
+    if not dry_run and (full or orphans or lost):
         summary.reached_removal_step = True
 
         # ADR-0010 §6 layer 3. Deletion is the only destructive operation here,
@@ -260,6 +267,8 @@ def run_ingest(
             known_count=len(known),
             vanished_count=len(orphans) + len(lost),
             threshold=threshold,
+            gone_count=len(orphans),
+            lost_access_count=len(lost),
         )
         # An operator who has LOOKED may declare what they expect. A number
         # cannot be typed from habit the way a --force flag can: it has to

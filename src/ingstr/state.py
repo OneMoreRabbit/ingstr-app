@@ -85,7 +85,13 @@ CREATE TABLE IF NOT EXISTS file_failures (
 -- no row and therefore neither raises nor clears anything.
 CREATE TABLE IF NOT EXISTS run_removals (
     run_id         TEXT PRIMARY KEY,
-    refused_reason TEXT
+    refused_reason TEXT,
+    -- The two kinds, kept apart. An operator reading a refusal has to know
+    -- which it is: a file gone from disk is a deletion or a broken mount; a
+    -- file that can no longer be classified is access withdrawn. Different
+    -- causes, different remedies, and one total hides both.
+    gone_count         INTEGER,
+    lost_access_count  INTEGER
 );
 """
 
@@ -130,6 +136,10 @@ class RunRecord:
     files_errored: int | None
     chunks_written: int | None
     exit_code: int | None
+    #: The two kinds of removal this run made, or would have made when it
+    #: refused. None on runs that never reached the removal step.
+    gone_count: int | None = None
+    lost_access_count: int | None = None
     #: Set when this run refused to remove passages because too much had
     #: vanished at once. Kept so the refusal can be asked about later: until
     #: it is cleared, passages of files whose access was taken away can still
@@ -327,7 +337,10 @@ class StateDB:
         with self._cursor() as cur:
             row = cur.execute(
                 f"""
-                SELECT runs.*, run_removals.refused_reason AS purge_refused_reason
+                SELECT runs.*,
+                       run_removals.refused_reason AS purge_refused_reason,
+                       run_removals.gone_count,
+                       run_removals.lost_access_count
                 FROM runs
                 LEFT JOIN run_removals ON run_removals.run_id = CAST(runs.run_id AS TEXT)
                 WHERE {where} ORDER BY runs.run_id DESC LIMIT 1
@@ -348,7 +361,10 @@ class StateDB:
         with self._cursor() as cur:
             row = cur.execute(
                 """
-                SELECT runs.*, run_removals.refused_reason AS purge_refused_reason
+                SELECT runs.*,
+                       run_removals.refused_reason AS purge_refused_reason,
+                       run_removals.gone_count,
+                       run_removals.lost_access_count
                 FROM run_removals
                 JOIN runs ON CAST(runs.run_id AS TEXT) = run_removals.run_id
                 ORDER BY runs.run_id DESC LIMIT 1
@@ -371,6 +387,8 @@ class StateDB:
         exit_code: int,
         purge_refused_reason: str | None = None,
         reached_removal_step: bool = False,
+        gone_count: int = 0,
+        lost_access_count: int = 0,
     ) -> None:
         with self._cursor() as cur:
             cur.execute(
@@ -398,8 +416,14 @@ class StateDB:
             )
             if reached_removal_step:
                 cur.execute(
-                    "INSERT INTO run_removals (run_id, refused_reason) VALUES (?, ?) "
-                    "ON CONFLICT(run_id) DO UPDATE SET "
-                    "refused_reason = excluded.refused_reason",
-                    (str(run_id), purge_refused_reason),
+                    """
+                    INSERT INTO run_removals
+                        (run_id, refused_reason, gone_count, lost_access_count)
+                    VALUES (?, ?, ?, ?)
+                    ON CONFLICT(run_id) DO UPDATE SET
+                        refused_reason    = excluded.refused_reason,
+                        gone_count        = excluded.gone_count,
+                        lost_access_count = excluded.lost_access_count
+                    """,
+                    (str(run_id), purge_refused_reason, gone_count, lost_access_count),
                 )
