@@ -7,6 +7,11 @@ _VALID_PLAN = """\
 required_groups:
 - arc_g0_engineering_global
 - arc_g18_any_global
+groups:
+- {name: arc_g0_engineering_global, org: arc, grade: g0,
+   vertical: engineering, scope: global}
+- {name: arc_g18_any_global, org: arc, grade: g18,
+   vertical: any, scope: global}
 """
 
 _VALID_MAP = """\
@@ -61,7 +66,13 @@ groups:
   arc_g0_engineering_global: 1003
   arc_g18_any_global: 1004
 """
-    plan_with_extra = _VALID_PLAN + "- arc_g9_finance_global\n"
+    plan_with_extra = _VALID_PLAN.replace(
+        "- arc_g18_any_global\ngroups:",
+        "- arc_g18_any_global\n- arc_g9_finance_global\ngroups:",
+    ) + (
+        "- {name: arc_g9_finance_global, org: arc, grade: g9,\n"
+        "   vertical: finance, scope: global}\n"
+    )
     with pytest.raises(PlanError, match="missing groups that compiled_plan.yml"):
         load_plan(
             tmp_yaml("compiled_plan.yml", plan_with_extra),
@@ -125,3 +136,87 @@ def test_required_groups_must_be_list(tmp_yaml):
             tmp_yaml("compiled_plan.yml", bad_plan),
             tmp_yaml("group_gid_map.yml", _VALID_MAP),
         )
+
+
+# ── v0.2.0: groups[] and per-org gids (compiled-rbac-plan 0.11) ─────────────
+
+_PLAN_WITH_GROUPS = """\
+required_groups:
+- arc_g0_engineering_global
+- job_g1_personal_global
+groups:
+- {name: arc_g0_engineering_global, org: arc, grade: g0,
+   vertical: engineering, scope: global}
+- {name: job_g1_personal_global, org: job, grade: g1,
+   vertical: personal, scope: global}
+"""
+
+_MAP_TWO = """\
+groups:
+  arc_g0_engineering_global: 1003
+  job_g1_personal_global: 1200
+"""
+
+
+def test_groups_section_gives_each_group_its_org(tmp_yaml):
+    plan = load_plan(
+        tmp_yaml("plan.yml", _PLAN_WITH_GROUPS), tmp_yaml("map.yml", _MAP_TWO)
+    )
+    assert plan.org_of_group("arc_g0_engineering_global") == "arc"
+    assert plan.org_of_group("job_g1_personal_global") == "job"
+
+
+def test_gids_for_org_narrows_to_that_org(tmp_yaml):
+    """The whole point: a run holds only its own org's group ids, so the mount
+    decides what is visible and this decides what is readable."""
+    plan = load_plan(
+        tmp_yaml("plan.yml", _PLAN_WITH_GROUPS), tmp_yaml("map.yml", _MAP_TWO)
+    )
+    assert plan.gids_for_org("arc") == frozenset({1003})
+    assert plan.gids_for_org("job") == frozenset({1200})
+    assert plan.gids_for_org("nobody") == frozenset()
+
+
+def test_plan_without_groups_section_is_refused(tmp_yaml):
+    """v0.2.0 requires contract 0.11.
+
+    The section is additive in the contract, so an older plan is legal there.
+    It is not legal here: a run narrows its group ids by org and cannot do it
+    without the section. Falling back to every gid in the estate-wide map is
+    the behaviour this release exists to end — and it is what the estate's
+    current plan would have produced, silently. Arch ruled it an error
+    (hub #13871).
+    """
+    with pytest.raises(PlanError, match="no 'groups' section"):
+        load_plan(
+            tmp_yaml("plan.yml", "required_groups:\n- arc_g0_engineering_global\n"),
+            tmp_yaml("map.yml", "groups:\n  arc_g0_engineering_global: 1003\n"),
+        )
+
+
+def test_the_refusal_names_what_to_do_about_it(tmp_yaml):
+    """An error that names the contract version and the compiler release is
+    actionable; "missing section" is not."""
+    with pytest.raises(PlanError, match="0.11.*v0.7.3"):
+        load_plan(
+            tmp_yaml("plan.yml", "required_groups:\n- arc_g0_engineering_global\n"),
+            tmp_yaml("map.yml", "groups:\n  arc_g0_engineering_global: 1003\n"),
+        )
+
+
+def test_groups_disagreeing_with_required_groups_is_refused(tmp_yaml):
+    """0.11 guarantees the two are equal element for element. If they are not,
+    a reader would classify differently depending on which it believed."""
+    bad = "\n".join(
+        line for line in _PLAN_WITH_GROUPS.splitlines()
+        if "job_g1_personal_global, org: job" not in line
+        and "vertical: personal" not in line
+    ) + "\n"
+    with pytest.raises(PlanError, match="disagree"):
+        load_plan(tmp_yaml("plan.yml", bad), tmp_yaml("map.yml", _MAP_TWO))
+
+
+def test_groups_row_missing_org_is_refused(tmp_yaml):
+    bad = _PLAN_WITH_GROUPS.replace(", org: job", "")
+    with pytest.raises(PlanError, match="'name' and 'org'"):
+        load_plan(tmp_yaml("plan.yml", bad), tmp_yaml("map.yml", _MAP_TWO))

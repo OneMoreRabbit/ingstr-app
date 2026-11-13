@@ -11,9 +11,15 @@ import structlog
 from .availability import DEFAULT_PURGE_THRESHOLD, assess_purge
 from .chunk import Chunk, chunk_elements
 from .classify import classify
-from .config import IngstrConfig
+from .config import OrgView
 from .embed import EmbeddingClient
-from .exceptions import ConfigError, IngstrError, UnclassifiableFile, UpstreamUnavailable
+from .exceptions import (
+    ConfigError,
+    IngstrError,
+    UnclassifiableFile,
+    UpstreamUnavailable,
+    WrongOrgFile,
+)
 from .hashing import sha256_file
 from .parse import parse_file
 from .plan import ResolvedPlan
@@ -22,6 +28,16 @@ from .state import FileRecord, StateDB
 
 # Stable namespace for deterministic point IDs.
 # Changing this would orphan all previously-written points; do not edit.
+#
+# v0.2.0 changed what is hashed INSIDE this namespace: the id is now
+# uuid5(namespace, "<org>:<path below the org's root>:<passage number>"),
+# where it was the container-absolute path. The absolute path made the id
+# depend on where a reader happened to mount the data, so one deployment
+# serving several orgs — which cannot mount them all at the same place —
+# would have changed every id. This form does not move when a mount does.
+# The change orphaned every point written before v0.2.0; it was made in the
+# same release as the embedding-model change, so one full index paid for both
+# (one-search-service design, accepted 2026-11-13).
 _POINT_NAMESPACE = uuid.UUID("a8f4c0d2-1d5e-4b8a-9d6f-3e2c1a0b7f4e")
 
 _log = structlog.get_logger(__name__)
@@ -33,6 +49,10 @@ class RunSummary:
     files_indexed: int = 0
     files_skipped: int = 0
     files_errored: int = 0
+    #: Files refused because their group belongs to another org. Counted apart
+    #: from files_errored so "this org's folder holds another org's data" is
+    #: visible as itself rather than buried in a parse-failure total.
+    files_wrong_org: int = 0
     chunks_written: int = 0
     files_deleted: int = 0
     #: Set when ADR-0010 §6 layer 3 refused a purge. The run keeps whatever it
@@ -53,7 +73,7 @@ class _ProcessOutcome:
 
 
 def run_ingest(
-    cfg: IngstrConfig,
+    cfg: OrgView,
     plan: ResolvedPlan,
     *,
     state: StateDB,
@@ -101,6 +121,19 @@ def run_ingest(
             )
             _record_per_file_error(state, path, error=str(e))
             summary.files_errored += 1
+            continue
+        except WrongOrgFile as e:
+            _log.error(
+                "file_wrong_org",
+                source_path=abs_path,
+                gid=e.gid,
+                group=e.group,
+                group_org=e.group_org,
+                run_org=e.run_org,
+            )
+            _record_per_file_error(state, path, error=str(e))
+            summary.files_errored += 1
+            summary.files_wrong_org += 1
             continue
         except UpstreamUnavailable:
             # Systemic failure — Ollama/Qdrant unreachable. Don't swallow:
@@ -205,7 +238,7 @@ def _rel_posix(path: Path, root: Path) -> str:
 def _process_file(
     path: Path,
     *,
-    cfg: IngstrConfig,
+    cfg: OrgView,
     plan: ResolvedPlan,
     state: StateDB,
     embedder: EmbeddingClient,
@@ -218,7 +251,7 @@ def _process_file(
     rel_path = path.relative_to(cfg.source.root).as_posix()
 
     # 1. classify (raises UnclassifiableFile)
-    group = classify(path, plan)
+    group = classify(path, plan, cfg.org)
 
     # 2. hash + stat
     stat_info = path.stat()
@@ -276,6 +309,7 @@ def _process_file(
         _build_point(
             chunk=c,
             vector=v,
+            org=cfg.org,
             source_path=abs_path,
             source_path_rel=rel_path,
             classification_group=group,
@@ -323,6 +357,7 @@ def _build_point(
     *,
     chunk: Chunk,
     vector: list[float],
+    org: str,
     source_path: str,
     source_path_rel: str,
     classification_group: str,
@@ -332,7 +367,7 @@ def _build_point(
     file_type: str,
 ) -> QdrantPoint:
     point_id = str(
-        uuid.uuid5(_POINT_NAMESPACE, f"{source_path}:{chunk.index}")
+        uuid.uuid5(_POINT_NAMESPACE, f"{org}:{source_path_rel}:{chunk.index}")
     )
     return QdrantPoint(
         id=point_id,

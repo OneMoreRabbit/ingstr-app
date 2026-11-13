@@ -105,19 +105,105 @@ class LoggingConfig(BaseModel):
     log_full_query: bool = False
 
 
-class IngstrConfig(BaseModel):
+class OrgConfig(BaseModel):
+    """One organisation: its folder, its collection, its state database.
+
+    The estate runs one deployment with every org listed here, and one
+    container per org per run, with only that org's folder mounted (the
+    one-search-service design, accepted 2026-11-13). Everything that is
+    per-org lives here; everything shared lives on `IngstrConfig`.
+    """
+
     model_config = ConfigDict(extra="forbid")
 
     org: str
     source: SourceConfig
     agent_source: AgentSourceConfig | None = None
+    qdrant: QdrantConfig
+    state: StateConfig
+
+
+class OrgView(BaseModel):
+    """One org's settings and the shared settings, resolved into one object.
+
+    The pipeline works on a single org and never chooses between them, so it
+    is handed this rather than the whole configuration. Choosing the org is
+    `IngstrConfig.for_org`, which happens once, in the CLI.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    org: str
+    source: SourceConfig
+    agent_source: AgentSourceConfig | None
     plan: PlanConfig
     embedding: EmbeddingConfig
     qdrant: QdrantConfig
+    chunking: ChunkingConfig
+    parsers: dict[str, str]
+    state: StateConfig
+    logging: LoggingConfig
+
+
+class IngstrConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    orgs: list[OrgConfig] = Field(min_length=1)
+    plan: PlanConfig
+    embedding: EmbeddingConfig
     chunking: ChunkingConfig = ChunkingConfig()
     parsers: dict[str, str] = Field(default_factory=dict)
-    state: StateConfig
     logging: LoggingConfig = LoggingConfig()
+
+    @field_validator("orgs")
+    @classmethod
+    def _org_names_are_unique(cls, v: list[OrgConfig]) -> list[OrgConfig]:
+        """Two orgs with one name would make `--org` ambiguous and the second
+        unreachable — silently, since the first match would always win."""
+        seen: set[str] = set()
+        duplicates = sorted({o.org for o in v if o.org in seen or seen.add(o.org)})  # type: ignore[func-returns-value]
+        if duplicates:
+            raise ValueError(f"duplicate org name(s) in 'orgs': {duplicates}")
+        return v
+
+    @property
+    def org_names(self) -> list[str]:
+        return [o.org for o in self.orgs]
+
+    def for_org(self, name: str | None) -> OrgView:
+        """Resolve one org's settings, or fail saying which names exist.
+
+        `name` may be omitted only when exactly one org is configured. With
+        several, the org governs what is read and written, so it is declared
+        or the tool stops (constitution §11) — never the first in the list.
+        """
+        if name is None:
+            if len(self.orgs) != 1:
+                raise ConfigError(
+                    "--org is required when the configuration lists more than "
+                    f"one org; configured: {', '.join(self.org_names)}"
+                )
+            chosen = self.orgs[0]
+        else:
+            matches = [o for o in self.orgs if o.org == name]
+            if not matches:
+                raise ConfigError(
+                    f"no org named {name!r} in the configuration; "
+                    f"configured: {', '.join(self.org_names)}"
+                )
+            chosen = matches[0]
+        return OrgView(
+            org=chosen.org,
+            source=chosen.source,
+            agent_source=chosen.agent_source,
+            plan=self.plan,
+            embedding=self.embedding,
+            qdrant=chosen.qdrant,
+            chunking=self.chunking,
+            parsers=self.parsers,
+            state=chosen.state,
+            logging=self.logging,
+        )
 
     @field_validator("parsers")
     @classmethod

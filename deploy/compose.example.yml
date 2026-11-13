@@ -1,9 +1,15 @@
 # Ingstr deploy on otter — compose example.
 #
-# One compose stack = one organisation. Per-org Qdrant + Ingstr + state
-# volume; shared Ollama and shared host-mounted registry. The org's data
-# share is NFS-mounted INSIDE the container (so otter's host filesystem
-# stays free of org data).
+# ONE DEPLOYMENT, ONE CONTAINER PER ORG PER RUN (v0.2.0). One config.yml
+# lists every org; each run names its org with --org and only that org's
+# folder is mounted. Per-org Qdrant and state volume; shared Ollama and
+# shared host-mounted registry. The org's data share is NFS-mounted
+# INSIDE the container (so otter's host filesystem stays free of org
+# data).
+#
+# One stack directory per org, as before: the directory name becomes the
+# compose project name, which is what keeps each org's state volume its
+# own.
 #
 # Variables expected from --env-file (typically secrets.env, populated
 # by Ansible at deploy time):
@@ -32,9 +38,11 @@
 # Ingstr is a one-shot job. Do NOT `docker compose up`. Invoke runs
 # explicitly:
 #
-#   docker compose --env-file secrets.env -f compose.yml run --rm ingstr health
-#   docker compose --env-file secrets.env -f compose.yml run --rm ingstr ingest --dry-run
-#   docker compose --env-file secrets.env -f compose.yml run --rm ingstr ingest
+#   docker compose --env-file secrets.env run --rm -T ingstr health --org arc
+#   docker compose --env-file secrets.env run --rm -T ingstr ingest --org arc --dry-run
+#   docker compose --env-file secrets.env run --rm -T ingstr ingest --org arc
+#
+# --org may be omitted only when config.yml lists exactly one org.
 #
 # Or wire a `docker compose run` invocation into a systemd .service
 # unit triggered by a .path unit (see deploy/systemd/).

@@ -12,7 +12,67 @@ Newest first. One entry per release tag, written in the same commit that cuts th
 tag. Plain English: a reader skimming this page should know what changed and
 whether they have to act.
 
+## v0.2.0 — 2026-11-13
+
+**TL;DR:** one configuration lists every org and a run reads one of them; a
+passage id no longer depends on where the data is mounted; a run holds only
+its own org's group ids. **Every passage id changes**, so a collection is
+rebuilt rather than upgraded — this release is deployed together with the new
+embedding model, and one full index pays for both.
+
+- **One configuration, every org.** `config.yml` grows an `orgs:` list, each
+  with its own source root, Qdrant and state database; plan, embedding,
+  chunking, parsers and logging are shared. Every run names its org:
+  `ingstr ingest --org arc`. With exactly one org configured `--org` may be
+  omitted. **This is a breaking configuration change**: unknown keys are
+  refused, so a v0.1.x configuration fails at startup.
+- **A passage id is now `uuid5("<org>:<path below the org's root>:<passage
+  number>")`** where it was the container-absolute path. The old form moved
+  whenever a mount moved, and collided between orgs sharing a relative path.
+  See `qdrant-collection-contract` 0.2 in the Atlas vault.
+- **A run holds only its own org's group ids**, read from `groups[]` in
+  `compiled-rbac-plan` 0.11. Until now the entrypoint took every group id in
+  the estate-wide map. **v0.2.0 requires that contract** (rbac-compiler
+  v0.7.3): an older plan exits 1 naming what to do, rather than falling back.
+- **An unreadable plan stops the run** instead of starting with no groups and
+  reporting every file as unclassifiable. `ingstr version` and `--help` still
+  need no configuration.
+- **A file whose group belongs to another org** is refused, recorded against
+  the file, and counted apart from parse failures.
+- **PDFs parse as the dropped user.** The image sets `HOME`,
+  `XDG_CACHE_HOME`, `NUMBA_CACHE_DIR` and `MPLCONFIGDIR` to directories that
+  user owns, and **the build now fails if a PDF cannot be parsed as that
+  user** — the check that would have caught the v0.1.1 failure. No deployment
+  needs `NUMBA_CACHE_DIR`.
+- **Library versions are pinned** in `constraints.txt`, used by the image
+  build. The same source built on another day is now the same image; it was
+  not before, which is how v0.1.1 got a numba that needed a cache directory
+  and v0.1.0 did not.
+
+**Action:** deploy the new configuration and the new image together, then
+index into a **new collection**. The old collection's ids cannot be reused.
+Run `ingstr health --org <org>` first: exit 1 names a configuration value, a
+group missing from the map, or a plan older than contract 0.11.
+
+**Known limits, unchanged:** exclude patterns match case-sensitively, as
+gitignore does — `**/*.heic` does not exclude `IMG_1.HEIC`; write both cases.
+`.doc` (not `.docx`) needs LibreOffice, which this image does not carry, so
+those files are reported as per-file errors. A file that can never be parsed
+fails every run rather than being recorded once and skipped.
+
 ## v0.1.1 — 2026-11-12
+
+> **Added 2026-11-13, after the tag: PDFs need `NUMBA_CACHE_DIR` set by the
+> deployment.** Every PDF fails on this version with "cannot cache function
+> 'projection_by_bboxes': no locator available". The image drops privileges
+> with `setpriv`, which changes the uid and the groups and not the
+> environment, so `HOME` stays `/root` and numba cannot write its cache. Set
+> `NUMBA_CACHE_DIR=/tmp/numba-cache` in the compose file, and re-run an
+> ordinary `ingest` — a file that failed has an empty stored hash, so it is
+> tried again. Word, Excel and PowerPoint files are unaffected. Fixed in the
+> image from v0.2.0; no deployment line is needed there. Measured on otter in
+> the ARC restore: 339 PDFs, all failed.
+
 
 **TL;DR:** a full run can no longer quietly delete an index because a mount was
 missing. If you run `ingest --full` anywhere, this is the version to run.

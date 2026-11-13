@@ -20,12 +20,19 @@ from ingstr.config import (
     EmbeddingConfig,
     IngstrConfig,
     LoggingConfig,
+    OrgConfig,
+    OrgView,
     PlanConfig,
     QdrantConfig,
     SourceConfig,
     StateConfig,
 )
-from ingstr.exceptions import IngstrError, UnclassifiableFile, UpstreamUnavailable
+from ingstr.exceptions import (
+    IngstrError,
+    UnclassifiableFile,
+    UpstreamUnavailable,
+    WrongOrgFile,
+)
 from ingstr.pipeline import run_ingest
 from ingstr.plan import ResolvedPlan
 from ingstr.state import StateDB
@@ -33,10 +40,27 @@ from ingstr.state import StateDB
 # ── Fixtures ────────────────────────────────────────────────────────────────
 
 
-def _cfg(root: Path, db_path: Path) -> IngstrConfig:
-    return IngstrConfig(
-        org="test",
-        source=SourceConfig(root=root, follow_symlinks=False, exclude_patterns=[]),
+def _cfg(root: Path, db_path: Path, org: str = "test") -> OrgView:
+    """One org's resolved view — what the pipeline is handed.
+
+    Built through IngstrConfig.for_org rather than constructed directly, so
+    these tests exercise the same resolution path the CLI uses.
+    """
+    whole = IngstrConfig(
+        orgs=[
+            OrgConfig(
+                org=org,
+                source=SourceConfig(root=root, follow_symlinks=False, exclude_patterns=[]),
+                qdrant=QdrantConfig(
+                    url="http://x",
+                    api_key_env="X",
+                    collection="c",
+                    upsert_batch_size=2,
+                    timeout_seconds=5,
+                ),
+                state=StateConfig(db_path=db_path),
+            )
+        ],
         plan=PlanConfig(
             compiled_plan_path=root / "_ignored",
             group_gid_map_path=root / "_ignored",
@@ -44,23 +68,20 @@ def _cfg(root: Path, db_path: Path) -> IngstrConfig:
         embedding=EmbeddingConfig(
             endpoint="http://x", model="m", vector_dim=4, timeout_seconds=5, batch_size=2
         ),
-        qdrant=QdrantConfig(
-            url="http://x",
-            api_key_env="X",
-            collection="c",
-            upsert_batch_size=2,
-            timeout_seconds=5,
-        ),
         chunking=ChunkingConfig(),
-        state=StateConfig(db_path=db_path),
         logging=LoggingConfig(),
     )
+    return whole.for_org(org)
 
 
 def _plan() -> ResolvedPlan:
     return ResolvedPlan(
         gid_to_group={1003: "arc_g0_engineering_global", 1004: "arc_g18_any_global"},
         required_groups=frozenset({"arc_g0_engineering_global", "arc_g18_any_global"}),
+        group_org={
+            "arc_g0_engineering_global": "test",
+            "arc_g18_any_global": "test",
+        },
         plan_source_path=Path("/dev/null"),
         map_source_path=Path("/dev/null"),
     )
@@ -270,7 +291,7 @@ def test_unclassifiable_file_is_errored_not_aborted(fs) -> None:
     qdrant = _mock_qdrant()
 
     # `classify` raises UnclassifiableFile only for "a.pdf"
-    def fake_classify(path, _plan):
+    def fake_classify(path, _plan, _org):
         if path.name == "a.pdf":
             raise UnclassifiableFile(path, gid=9999)
         return "arc_g0_engineering_global"
@@ -493,3 +514,37 @@ def test_dry_run_never_reaches_the_guard(fs) -> None:
 
     assert summary.purge_refused_reason is None
     assert summary.files_deleted == 0
+
+
+# ── v0.2.0: a file belonging to another org ─────────────────────────────────
+
+
+def test_wrong_org_file_is_counted_apart_from_other_errors(fs, monkeypatch) -> None:
+    """A file in this org's folder owned by another org's group is refused,
+    recorded against the file, and counted separately — so "this folder holds
+    another org's data" is visible as itself rather than as a parse failure.
+    """
+    cfg, plan, state, root = fs
+    _write(root / "ours.pdf")
+    _write(root / "theirs.pdf")
+    embedder = _mock_embedder()
+    qdrant = _mock_qdrant()
+
+    def fake_classify(path, _plan, org):
+        if path.name == "theirs.pdf":
+            raise WrongOrgFile(path, gid=1200, group="job_g1", group_org="job", run_org=org)
+        return "arc_g0_engineering_global"
+
+    with patch("ingstr.pipeline.classify", side_effect=fake_classify), \
+         patch("ingstr.pipeline.parse_file", return_value=["el"]), \
+         patch("ingstr.pipeline.chunk_elements", return_value=[Chunk("c", 0, 1)]), \
+         patch("ingstr.pipeline.sha256_file", return_value="h"):
+        summary = run_ingest(
+            cfg, plan, state=state, embedder=embedder, qdrant=qdrant, full=False, dry_run=False
+        )
+
+    assert summary.files_wrong_org == 1
+    assert summary.files_errored == 1
+    assert summary.files_indexed == 1
+    # The run completes: one bad file does not abort the others.
+    assert summary.files_seen == 2

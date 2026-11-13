@@ -26,7 +26,7 @@ WorkingDirectory=/home/otter/docker/ingstr/%i
 
 # No -f: compose reads compose.yml from WorkingDirectory, which is what keeps
 # the project name per-org. -T because there is no terminal under systemd.
-ExecStart=/usr/bin/docker compose --env-file secrets.env run --rm -T ingstr ingest
+ExecStart=/usr/bin/docker compose --env-file secrets.env run --rm -T ingstr ingest --org %i
 StandardOutput=journal
 StandardError=journal
 

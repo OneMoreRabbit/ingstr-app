@@ -26,3 +26,26 @@ class UnclassifiableFile(IngstrError):
         )
         self.path = path
         self.gid = gid
+
+
+class WrongOrgFile(IngstrError):
+    """A file's group belongs to a different org than the one being read.
+
+    Separate from `UnclassifiableFile` on purpose. An unclassifiable file is a
+    file the estate has not classified; this is a file the estate *has*
+    classified, into an org this run is not indexing. Both are refused, but
+    they call for different action — the first for a classification, the second
+    for someone to look at why one org's folder holds another org's data — so
+    they are reported apart rather than counted together.
+    """
+
+    def __init__(self, path: Path, gid: int, group: str, group_org: str, run_org: str) -> None:
+        super().__init__(
+            f"{path}: group {group!r} belongs to org {group_org!r}, "
+            f"but this run is indexing {run_org!r}; refusing to index"
+        )
+        self.path = path
+        self.gid = gid
+        self.group = group
+        self.group_org = group_org
+        self.run_org = run_org

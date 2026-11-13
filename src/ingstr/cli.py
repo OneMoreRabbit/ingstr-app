@@ -8,7 +8,7 @@ import structlog
 import typer
 
 from . import __version__
-from .config import DEFAULT_CONFIG_PATH, IngstrConfig, load_config
+from .config import DEFAULT_CONFIG_PATH, IngstrConfig, OrgView, load_config
 from .embed import EmbeddingClient
 from .exceptions import ConfigError, PlanError, UpstreamUnavailable
 from .logging_setup import configure_logging
@@ -34,6 +34,17 @@ ConfigOption = Annotated[
     ),
 ]
 
+OrgOption = Annotated[
+    str | None,
+    typer.Option(
+        "--org",
+        help=(
+            "Which organisation to act on. Required when the configuration "
+            "lists more than one; with exactly one it may be omitted."
+        ),
+    ),
+]
+
 
 # Exit codes per brief §4
 _EXIT_OK = 0
@@ -46,13 +57,15 @@ _EXIT_FATAL = 4
 @app.command()
 def ingest(
     config: ConfigOption = DEFAULT_CONFIG_PATH,
+    org: OrgOption = None,
     full: Annotated[bool, typer.Option("--full", help="Force a complete re-walk.")] = False,
     dry_run: Annotated[bool, typer.Option("--dry-run", help="Plan but do not write.")] = False,
 ) -> None:
-    """Walk the configured tree and ingest changed files."""
-    cfg = _load_or_exit(config)
+    """Walk one org's tree and ingest changed files."""
+    whole = _load_or_exit(config)
+    cfg = _org_or_exit(whole, org)
     configure_logging(cfg.logging)
-    log = structlog.get_logger("ingstr.ingest")
+    log = structlog.get_logger("ingstr.ingest").bind(org=cfg.org)
 
     plan = _load_plan_or_exit(cfg)
     api_key = _read_api_key_or_exit(cfg)
@@ -134,9 +147,10 @@ def ingest(
 
 
 @app.command()
-def stats(config: ConfigOption = DEFAULT_CONFIG_PATH) -> None:
-    """Print file/chunk/error counts and last-run timestamps. Read-only."""
-    cfg = _load_or_exit(config)
+def stats(config: ConfigOption = DEFAULT_CONFIG_PATH, org: OrgOption = None) -> None:
+    """Print one org's file/chunk/error counts and last-run timestamps. Read-only."""
+    whole = _load_or_exit(config)
+    cfg = _org_or_exit(whole, org)
     configure_logging(cfg.logging)
 
     api_key = os.environ.get(cfg.qdrant.api_key_env, "")
@@ -167,12 +181,14 @@ def stats(config: ConfigOption = DEFAULT_CONFIG_PATH) -> None:
 
 
 @app.command()
-def health(config: ConfigOption = DEFAULT_CONFIG_PATH) -> None:
-    """Check connectivity to Qdrant, Ollama, NFS mount, and the compiled plan."""
-    cfg = _load_or_exit(config)
+def health(config: ConfigOption = DEFAULT_CONFIG_PATH, org: OrgOption = None) -> None:
+    """Check one org's Qdrant, Ollama, source mount and the compiled plan."""
+    whole = _load_or_exit(config)
+    cfg = _org_or_exit(whole, org)
     configure_logging(cfg.logging)
 
     checks: list[tuple[str, bool, str]] = []
+    checks.append(("org", True, cfg.org))
 
     src_ok = cfg.source.root.is_dir()
     checks.append(("source.root", src_ok, str(cfg.source.root)))
@@ -180,6 +196,19 @@ def health(config: ConfigOption = DEFAULT_CONFIG_PATH) -> None:
     try:
         plan = load_plan(cfg.plan.compiled_plan_path, cfg.plan.group_gid_map_path)
         checks.append(("plan", True, f"{len(plan.gid_to_group)} groups"))
+        # A plan without `groups[]` never reaches here — load_plan raises, and
+        # the check above reports it. What is worth reporting here is a plan
+        # that parses and gives this org nothing, which reads as a quiet
+        # success otherwise.
+        org_gids = plan.gids_for_org(cfg.org)
+        checks.append(
+            (
+                "plan.groups",
+                bool(org_gids),
+                f"{len(org_gids)} group(s) for org {cfg.org!r}"
+                + ("" if org_gids else " — this run would read nothing"),
+            )
+        )
     except PlanError as e:
         checks.append(("plan", False, str(e)))
 
@@ -233,6 +262,21 @@ def version() -> None:
 # ── helpers ─────────────────────────────────────────────────────────────────
 
 
+def _org_or_exit(cfg: IngstrConfig, org: str | None) -> OrgView:
+    """Resolve the org to act on, or exit 1 naming the configured ones.
+
+    The org decides which folder is read and which collection is written, so
+    with several configured it is declared or the tool stops (constitution
+    §11). Picking the first would be a plausible default for a target, which
+    is the kind nobody audits.
+    """
+    try:
+        return cfg.for_org(org)
+    except ConfigError as e:
+        typer.echo(f"config error: {e}", err=True)
+        raise typer.Exit(code=_EXIT_CONFIG) from e
+
+
 def _load_or_exit(config_path: Path) -> IngstrConfig:
     """Load config, mapping known errors to brief §4 exit codes."""
     try:
@@ -242,7 +286,7 @@ def _load_or_exit(config_path: Path) -> IngstrConfig:
         raise typer.Exit(code=_EXIT_CONFIG) from e
 
 
-def _load_plan_or_exit(cfg: IngstrConfig) -> ResolvedPlan:
+def _load_plan_or_exit(cfg: OrgView) -> ResolvedPlan:
     try:
         return load_plan(cfg.plan.compiled_plan_path, cfg.plan.group_gid_map_path)
     except PlanError as e:
@@ -250,7 +294,7 @@ def _load_plan_or_exit(cfg: IngstrConfig) -> ResolvedPlan:
         raise typer.Exit(code=_EXIT_UPSTREAM) from e
 
 
-def _read_api_key_or_exit(cfg: IngstrConfig) -> str:
+def _read_api_key_or_exit(cfg: OrgView) -> str:
     api_key = os.environ.get(cfg.qdrant.api_key_env, "")
     if not api_key:
         typer.echo(
