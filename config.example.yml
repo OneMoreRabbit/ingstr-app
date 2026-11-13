@@ -24,6 +24,16 @@ orgs:
     # container, so the host filesystem stays clean of org data.
     source:
       root: /mnt/data
+
+      # Where this org's folder sits beneath the plan's `acl` root, written
+      # as the plan writes paths: no leading slash, one trailing slash.
+      #
+      # REQUIRED when the plan carries `acl_grants`, and a run without it
+      # stops at startup. The plan writes grant paths relative to a root on
+      # beaver; this container sees `/mnt/data`. Nothing relates the two, and
+      # only whoever chose what to mount knows the answer — so it is declared
+      # here rather than guessed from the org name.
+      plan_path: arc/drive/
       follow_symlinks: false
       # gitignore-style globs, and MATCHED CASE-SENSITIVELY, as gitignore
       # does. "**/*.heic" does not exclude IMG_1.HEIC. Write both cases for

@@ -12,8 +12,42 @@ class SourceConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     root: Path
+    #: Where `root` sits beneath the plan's `acl` root, in the plan's own path
+    #: form (no leading slash, one trailing slash) — for example `arc/drive/`.
+    #:
+    #: Needed only to classify by `acl_grants`, and required then. The plan
+    #: writes its grant paths relative to a root on beaver; this container
+    #: sees its own mount point and nothing that relates the two. Nobody but
+    #: the estate knows the answer, because the estate chooses what is
+    #: mounted — so it is declared here rather than inferred from the org name
+    #: (constitution §10, and ADR-0010 §7's export root, which three
+    #: components each invented differently).
+    #:
+    #: A wrong value does not fail: it matches no grant, or the wrong one. So
+    #: a run that needs it and has not been given it stops.
+    plan_path: str | None = None
     follow_symlinks: bool = False
     exclude_patterns: list[str] = Field(default_factory=list)
+
+    @field_validator("plan_path")
+    @classmethod
+    def _plan_path_is_in_the_plan_s_form(cls, v: str | None) -> str | None:
+        """Written as the plan writes paths, or it matches nothing.
+
+        The joined path is compared against the plan's grant paths as plain
+        text. A leading slash or a missing trailing one produces a value that
+        looks right and matches nothing — a silent empty result, which is the
+        failure this component has spent a fortnight filing against others.
+        """
+        if v is None:
+            return None
+        if v.startswith("/") or not v.endswith("/"):
+            raise ValueError(
+                f"source.plan_path {v!r} must be written as the plan writes "
+                "paths: no leading slash, exactly one trailing slash "
+                "(e.g. 'arc/drive/')"
+            )
+        return v
 
 
 class AgentSourceConfig(BaseModel):

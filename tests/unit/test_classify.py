@@ -8,7 +8,10 @@ from ingstr.exceptions import UnclassifiableFile, WrongOrgFile
 from ingstr.plan import ResolvedPlan
 
 
-def _plan(group_org: dict[str, str] | None = None) -> ResolvedPlan:
+def _plan(
+    group_org: dict[str, str] | None = None,
+    grants: dict[str, frozenset[str]] | None = None,
+) -> ResolvedPlan:
     return ResolvedPlan(
         gid_to_group={
             1003: "arc_g0_engineering_global",
@@ -19,6 +22,7 @@ def _plan(group_org: dict[str, str] | None = None) -> ResolvedPlan:
             {"arc_g0_engineering_global", "arc_g18_any_global", "job_g1_personal_global"}
         ),
         group_org=group_org if group_org is not None else {},
+        grants=grants or {},
         plan_source_path=Path("/dev/null"),
         map_source_path=Path("/dev/null"),
     )

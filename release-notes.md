@@ -12,6 +12,69 @@ Newest first. One entry per release tag, written in the same commit that cuts th
 tag. Plain English: a reader skimming this page should know what changed and
 whether they have to act.
 
+## v0.3.0 — 2026-11-13
+
+**TL;DR:** folders shared by an added ACL rather than by classification are
+now indexed, classified by the grant on the folder. And the other half, which
+matters more: **taking access away takes it away in search** — a file that can
+no longer be classified has its passages removed, in every run.
+
+### Classifying by a grant
+
+- A file whose own group is an RBAC group is classified as today. **The
+  file's own group always wins**: a grant on a folder above it never widens
+  the audience for a file that was classified on purpose.
+- Otherwise, if the file sits under a path in the plan's `acl_grants`, it
+  takes that grant's group. Where grants nest, **the deepest wins** — the only
+  rule that makes a narrower share mean anything.
+- A folder carrying **two different grants** has its files refused and
+  reported. A passage has one group, so choosing would hand one of two
+  audiences access the plan does not state.
+- A file matching neither is refused, as before. **Nothing becomes readable
+  that the plan does not grant.**
+- **New required setting when the plan grants:** `source.plan_path`, per org —
+  where that org's `source.root` sits beneath the plan's `acl` root, written
+  as the plan writes paths (for example `arc/drive/`). The plan writes its
+  grant paths relative to a root on beaver and this container sees its own
+  mount point; nothing else relates the two, and nobody but the estate knows
+  the answer. A run whose plan has grants and whose org has not declared it
+  **stops**, rather than quietly matching no file. `ingstr health` reports it.
+
+### Taking access away
+
+- **A file that can no longer be classified loses its passages.** Its group
+  left the plan, a grant was withdrawn, or it is now another org's — and
+  before this, its passages stayed in Qdrant under the old group for ever.
+  Nothing removed them: the file is still on disk so it is not an orphan, and
+  it never reaches the indexing path so nothing overwrites it. Withdrawing a
+  grant left every passage in that folder findable by the revoked group.
+- **In every run, not only `--full`.** A grant is withdrawn in the plan, not
+  on disk; waiting for the nightly run is waiting with the access still
+  granted.
+- **Under the same guard as the orphan purge, counted with it.** A plan read
+  while half-written could re-classify everything at once — the same accident
+  as a broken mount in different clothes. A refusal removes **nothing**, not
+  some, and ends the run non-zero.
+- **An intended large removal gets through one declared way:**
+  `ingstr ingest --org <org> --expect-removals <n>`. Get `<n>` from
+  `--dry-run`, which reports what it would remove and removes nothing. A
+  number cannot be typed from habit the way a `--force` flag can. **Never put
+  it in a timer unit.**
+- Removal counts are reported as two numbers — files gone from disk, and
+  files that can no longer be classified — and **never as paths**: a path is
+  org data and the journal is on the host.
+
+### Also
+
+- `pyproject.toml`'s comment about dependencies said what was excluded and
+  implied the image was therefore slim. It is **about 3.75 GB compressed**,
+  and has been since v0.1.0: the `[pdf]` extra brings `unstructured-inference`
+  and with it torch, the CUDA runtime, transformers and onnxruntime. The
+  comment now says so.
+
+**Action:** if the plan has `acl_grants`, add `source.plan_path` to each org
+before deploying — a run without it stops at startup and says what to add.
+
 ## v0.2.1 — 2026-11-13
 
 **TL;DR:** an unchanged run was taking 6 minutes 24 seconds on otter, five of
