@@ -763,3 +763,79 @@ def test_a_parse_failure_is_tried_again_when_the_group_changes(fs) -> None:
                    full=False, dry_run=False)
 
     assert parse.call_count == 2
+
+
+def test_a_failed_parse_still_moves_its_passages_to_the_new_group(fs) -> None:
+    """arch's second catch before the tag (hub #13992).
+
+    A file indexed under one group, whose content then changes to something
+    that will not parse AND whose group has changed: nothing else in the run
+    would ever fix the passages. The hash no longer matches, so the refresh
+    branch is not reached, and the parse that would re-index it cannot
+    succeed. The passages sit under the old group — readable by the old
+    audience — and if the old content ever comes back they look correct and
+    stay wrong.
+
+    The index follows access in every run, whether or not the file can be read.
+    """
+    cfg, plan, state, root = fs
+    f = _write(root / "was_indexed.pdf", "original")
+    embedder, qdrant = _mock_embedder(), _mock_qdrant()
+
+    with patch("ingstr.pipeline.classify", return_value="group_a"), \
+         patch("ingstr.pipeline.parse_file", return_value=["el"]), \
+         patch("ingstr.pipeline.chunk_elements", return_value=[Chunk("c", 0, 1)]):
+        run_ingest(cfg, plan, state=state, embedder=embedder, qdrant=qdrant,
+                   full=False, dry_run=False)
+
+    f.write_text("content that will not parse")
+    qdrant.set_classification_group.reset_mock()
+
+    with patch("ingstr.pipeline.classify", return_value="group_b"), \
+         patch("ingstr.pipeline.parse_file", side_effect=IngstrError("cannot parse")):
+        summary = run_ingest(cfg, plan, state=state, embedder=embedder,
+                             qdrant=qdrant, full=False, dry_run=False)
+
+    assert summary.files_errored == 1
+    qdrant.set_classification_group.assert_called_once()
+    assert qdrant.set_classification_group.call_args[0][1] == "group_b"
+    record = state.get_file(str(f.resolve()))
+    assert record is not None and record.classification_group == "group_b"
+
+
+def test_a_dry_run_moves_nothing(fs) -> None:
+    """A dry run plans and does not write — including this."""
+    cfg, plan, state, root = fs
+    f = _write(root / "was_indexed.pdf", "original")
+    embedder, qdrant = _mock_embedder(), _mock_qdrant()
+
+    with patch("ingstr.pipeline.classify", return_value="group_a"), \
+         patch("ingstr.pipeline.parse_file", return_value=["el"]), \
+         patch("ingstr.pipeline.chunk_elements", return_value=[Chunk("c", 0, 1)]):
+        run_ingest(cfg, plan, state=state, embedder=embedder, qdrant=qdrant,
+                   full=False, dry_run=False)
+
+    f.write_text("content that will not parse")
+    qdrant.set_classification_group.reset_mock()
+
+    with patch("ingstr.pipeline.classify", return_value="group_b"), \
+         patch("ingstr.pipeline.parse_file", side_effect=IngstrError("cannot parse")):
+        run_ingest(cfg, plan, state=state, embedder=embedder, qdrant=qdrant,
+                   full=False, dry_run=True)
+
+    qdrant.set_classification_group.assert_not_called()
+
+
+def test_a_file_with_no_passages_moves_nothing(fs) -> None:
+    """Nothing to move: a file that never indexed has no passages carrying a
+    group, so a failed parse writes the record and touches Qdrant not at all."""
+    cfg, plan, state, root = fs
+    _write(root / "never_indexed.pdf")
+    embedder, qdrant = _mock_embedder(), _mock_qdrant()
+
+    with patch("ingstr.pipeline.classify", return_value="group_a"), \
+         patch("ingstr.pipeline.parse_file", side_effect=IngstrError("cannot parse")):
+        run_ingest(cfg, plan, state=state, embedder=embedder, qdrant=qdrant,
+                   full=False, dry_run=False)
+
+    qdrant.set_classification_group.assert_not_called()

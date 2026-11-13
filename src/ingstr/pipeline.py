@@ -60,6 +60,9 @@ class RunSummary:
     #: skipped them. This number says how much of the error count was carried
     #: rather than discovered.
     files_failed_skipped: int = 0
+    #: True when the run reached the step that removes passages. A run that
+    #: aborted before it neither raises a refusal nor clears one.
+    reached_removal_step: bool = False
     chunks_written: int = 0
     files_deleted: int = 0
     #: Set when ADR-0010 §6 layer 3 refused a purge. The run keeps whatever it
@@ -200,6 +203,7 @@ def run_ingest(
             summary.chunks_written += outcome.chunks
 
     if full and not dry_run:
+        summary.reached_removal_step = True
         known = state.all_paths()
         orphans = sorted(known - seen)
 
@@ -415,6 +419,30 @@ def _process_file(
     except UpstreamUnavailable:
         raise  # systemic, not this file's fault — the run aborts
     except IngstrError as e:
+        if (
+            not dry_run
+            and existing is not None
+            and existing.chunk_count > 0
+            and existing.classification_group != group
+        ):
+            # The file has passages carrying the OLD group, its content has
+            # changed to something that will not parse, and it has been
+            # re-classified. Nothing else in the run would ever fix that: the
+            # hash no longer matches, so the refresh branch is not reached,
+            # and the parse that would re-index it cannot succeed. The
+            # passages would sit under the old group for good — readable by
+            # the old audience — and if the old content ever came back they
+            # would look correct and stay wrong.
+            #
+            # The same rule as the removal ruling: the index follows access in
+            # every run, whether or not the file can be read.
+            _log.info(
+                "file_group_refreshed_on_failure",
+                source_path=abs_path,
+                was=existing.classification_group,
+                now=group,
+            )
+            qdrant.set_classification_group(abs_path, group, indexed_at=_utc_now_iso())
         _record_parse_failure(
             state,
             path,

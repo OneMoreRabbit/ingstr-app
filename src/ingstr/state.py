@@ -70,12 +70,22 @@ CREATE TABLE IF NOT EXISTS file_failures (
     recorded_at       TEXT NOT NULL
 );
 
--- Why a removal was refused, if it was. Kept because a refusal is a STATE,
--- not a moment: until it is cleared, passages of files whose access was taken
--- away can still be found. Before this it existed only in one run's stderr.
-CREATE TABLE IF NOT EXISTS run_refusals (
-    run_id TEXT PRIMARY KEY,
-    reason TEXT NOT NULL
+-- One row per run that REACHED the removal step, with the reason if it
+-- refused and NULL if it removed normally.
+--
+-- A refusal is a state, not a moment: until it is cleared, passages of files
+-- whose access was taken away can still be found, and that question had no
+-- answer once the journal had rolled. But it must stop being reported once a
+-- later run has done the removal — a warning that never clears stops being
+-- read, and the estate is asked to act on this one the same day. Hence the
+-- rows for the clean runs too: without them there is nothing to say the
+-- refusal is over.
+--
+-- A run that never reached the step (it aborted on an upstream fault) writes
+-- no row and therefore neither raises nor clears anything.
+CREATE TABLE IF NOT EXISTS run_removals (
+    run_id         TEXT PRIMARY KEY,
+    refused_reason TEXT
 );
 """
 
@@ -213,8 +223,15 @@ class StateDB:
                 )
 
     def delete_file(self, source_path: str) -> None:
+        """Forget a file entirely — both its record and any failure recorded
+        against it. Leaving the failure row behind is harmless today, since
+        the next record for that path overwrites it, but a half-deleted file
+        is the kind of thing that is true until it isn't."""
         with self._cursor() as cur:
             cur.execute("DELETE FROM files WHERE source_path = ?", (source_path,))
+            cur.execute(
+                "DELETE FROM file_failures WHERE source_path = ?", (source_path,)
+            )
 
     def all_paths(self) -> set[str]:
         with self._cursor() as cur:
@@ -310,33 +327,36 @@ class StateDB:
         with self._cursor() as cur:
             row = cur.execute(
                 f"""
-                SELECT runs.*, run_refusals.reason AS purge_refused_reason
+                SELECT runs.*, run_removals.refused_reason AS purge_refused_reason
                 FROM runs
-                LEFT JOIN run_refusals ON run_refusals.run_id = CAST(runs.run_id AS TEXT)
+                LEFT JOIN run_removals ON run_removals.run_id = CAST(runs.run_id AS TEXT)
                 WHERE {where} ORDER BY runs.run_id DESC LIMIT 1
                 """,
                 params,
             ).fetchone()
         return RunRecord(**dict(row)) if row else None
 
-    def last_refused_removal(self) -> RunRecord | None:
-        """The most recent run that refused to remove passages, if any.
+    def outstanding_refused_removal(self) -> RunRecord | None:
+        """The refused removal still outstanding, if there is one.
 
-        A refusal is a state, not a moment. Until someone clears it, passages
-        of files whose access was taken away are still findable — so the
-        question "is a removal still outstanding?" has to be answerable after
-        the run that refused has gone from the journal.
+        Outstanding means: the LAST run to reach the removal step refused. A
+        later run that reached it and removed normally has cleared the
+        condition, and reporting it after that would be a warning that never
+        goes away — which is a warning nobody reads, on the one condition the
+        estate is asked to act on the same day.
         """
         with self._cursor() as cur:
             row = cur.execute(
                 """
-                SELECT runs.*, run_refusals.reason AS purge_refused_reason
-                FROM runs
-                JOIN run_refusals ON run_refusals.run_id = CAST(runs.run_id AS TEXT)
+                SELECT runs.*, run_removals.refused_reason AS purge_refused_reason
+                FROM run_removals
+                JOIN runs ON CAST(runs.run_id AS TEXT) = run_removals.run_id
                 ORDER BY runs.run_id DESC LIMIT 1
                 """
             ).fetchone()
-        return RunRecord(**dict(row)) if row else None
+        if row is None or row["purge_refused_reason"] is None:
+            return None
+        return RunRecord(**dict(row))
 
     def finish_run(
         self,
@@ -350,6 +370,7 @@ class StateDB:
         chunks_written: int,
         exit_code: int,
         purge_refused_reason: str | None = None,
+        reached_removal_step: bool = False,
     ) -> None:
         with self._cursor() as cur:
             cur.execute(
@@ -375,9 +396,10 @@ class StateDB:
                     run_id,
                 ),
             )
-            if purge_refused_reason is not None:
+            if reached_removal_step:
                 cur.execute(
-                    "INSERT INTO run_refusals (run_id, reason) VALUES (?, ?) "
-                    "ON CONFLICT(run_id) DO UPDATE SET reason = excluded.reason",
+                    "INSERT INTO run_removals (run_id, refused_reason) VALUES (?, ?) "
+                    "ON CONFLICT(run_id) DO UPDATE SET "
+                    "refused_reason = excluded.refused_reason",
                     (str(run_id), purge_refused_reason),
                 )

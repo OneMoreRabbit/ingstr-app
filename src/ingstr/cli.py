@@ -162,7 +162,7 @@ def stats(config: ConfigOption = DEFAULT_CONFIG_PATH, org: OrgOption = None) -> 
         last_success = state.get_last_run(success_only=True)
         last_incremental = state.get_last_run(mode="incremental")
         last_full = state.get_last_run(mode="full")
-        refused = state.last_refused_removal()
+        refused = state.outstanding_refused_removal()
     finally:
         state.close()
 
@@ -180,7 +180,9 @@ def stats(config: ConfigOption = DEFAULT_CONFIG_PATH, org: OrgOption = None) -> 
         # A refused removal is a STATE, not a moment: until it is cleared,
         # passages of files whose access was taken away can still be found.
         # Printed here because this is where someone comes to ask whether it
-        # is still true, after the alert and after the journal has rolled.
+        # is still true, after the alert and after the journal has rolled —
+        # and NOT printed once a later run has done the removal, because a
+        # warning that never clears is one nobody reads.
         typer.echo(
             f"REMOVAL REFUSED:    run {refused.run_id} at {refused.finished_at} — "
             f"{refused.purge_refused_reason}"
@@ -337,6 +339,7 @@ def _finalise_run(
         chunks_written=summary.chunks_written if summary else 0,
         exit_code=exit_code,
         purge_refused_reason=summary.purge_refused_reason if summary else None,
+        reached_removal_step=summary.reached_removal_step if summary else False,
     )
 
 

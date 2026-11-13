@@ -41,10 +41,19 @@ and a refused removal can be asked about after the fact.
   result**, not the run's. Before this, one file deleted between being listed
   and being hashed raised `FileNotFoundError` out of the loop and ended the
   run at exit 4, discarding every other file's work.
-- **A refused removal is kept** in the run record and shown by `ingstr stats`.
-  It is a state, not a moment: until it is cleared, passages of files whose
-  access was taken away can still be found — and that question had no answer
-  once the journal had rolled.
+- **A refused removal is kept** in the run record and shown by `ingstr stats`
+  **while it is outstanding** — that is, until a later run reaches the removal
+  step and removes normally. It is a state, not a moment: until it is cleared,
+  passages of files whose access was taken away can still be found, and that
+  question had no answer once the journal had rolled. It stops being printed
+  once it is over, because a warning that never clears is one nobody reads.
+- **A parse failure no longer leaves passages under the wrong group.** A file
+  indexed under one group, whose content then changes to something that will
+  not parse and whose group has changed, has the group on its existing
+  passages refreshed before the failure is recorded. Nothing else in a run
+  would have fixed it: the hash no longer matches, so the refresh branch is
+  not reached, and the parse that would re-index it cannot succeed. The index
+  follows access in every run, whether or not the file can be read.
 - **Two orgs may not write to one collection.** Same Qdrant with different
   collections is fine; different Qdrant with the same collection name is
   fine. Sharing one would not collide, since a passage id carries its org —
