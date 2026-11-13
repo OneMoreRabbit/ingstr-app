@@ -19,9 +19,16 @@ runner = CliRunner()
 
 
 _MIN_CFG = """\
-org: test
-source:
-  root: {root}
+orgs:
+  - org: test
+    source:
+      root: {root}
+    qdrant:
+      url: http://qdrant:6333
+      api_key_env: QDRANT_RW_API_KEY
+      collection: documents
+    state:
+      db_path: {db}
 plan:
   compiled_plan_path: {plan}
   group_gid_map_path: {gid_map}
@@ -29,12 +36,6 @@ embedding:
   endpoint: http://ollama:11434
   model: nomic-embed-text
   vector_dim: 4
-qdrant:
-  url: http://qdrant:6333
-  api_key_env: QDRANT_RW_API_KEY
-  collection: documents
-state:
-  db_path: {db}
 """
 
 
@@ -213,3 +214,75 @@ def test_ingest_exits_non_zero_when_a_purge_is_refused(
 
     assert result.exit_code == 3
     assert "REFUSING to purge" in result.stderr
+
+
+# ── v0.2.0: one configuration, every org ────────────────────────────────────
+
+
+_TWO_ORG_CFG = """\
+orgs:
+  - org: arc
+    source:
+      root: {root}
+    qdrant:
+      url: http://qdrant_arc:6333
+      api_key_env: QDRANT_RW_API_KEY
+      collection: documents
+    state:
+      db_path: {db}
+  - org: job
+    source:
+      root: {root}
+    qdrant:
+      url: http://qdrant_job:6333
+      api_key_env: QDRANT_RW_API_KEY
+      collection: documents
+    state:
+      db_path: {db}
+plan:
+  compiled_plan_path: {plan}
+  group_gid_map_path: {gid_map}
+embedding:
+  endpoint: http://ollama:11434
+  model: nomic-embed-text
+  vector_dim: 4
+"""
+
+
+def _two_org_cfg_file(tmp_path: Path) -> Path:
+    root = tmp_path / "src"
+    root.mkdir()
+    plan = tmp_path / "plan.yml"
+    plan.write_text("required_groups:\n- arc_g0_engineering_global\n")
+    gid_map = tmp_path / "gid_map.yml"
+    gid_map.write_text("groups:\n  arc_g0_engineering_global: 1003\n")
+    cfg = tmp_path / "config.yml"
+    cfg.write_text(
+        _TWO_ORG_CFG.format(
+            root=root, plan=plan, gid_map=gid_map, db=tmp_path / "state.db"
+        )
+    )
+    return cfg
+
+
+def test_ingest_without_org_exits_one_when_several_are_configured(tmp_path: Path) -> None:
+    """§11 again: the org decides what is read and written, so it is declared
+    or the tool stops. Picking the first would be the plausible default."""
+    cfg = _two_org_cfg_file(tmp_path)
+    result = runner.invoke(app, ["ingest", "--config", str(cfg)])
+    assert result.exit_code == 1
+    assert "--org is required" in result.stdout + str(result.stderr or "")
+
+
+def test_unknown_org_exits_one_and_names_the_configured_ones(tmp_path: Path) -> None:
+    cfg = _two_org_cfg_file(tmp_path)
+    result = runner.invoke(app, ["stats", "--config", str(cfg), "--org", "nope"])
+    assert result.exit_code == 1
+    assert "arc, job" in result.stdout + str(result.stderr or "")
+
+
+def test_one_org_configured_needs_no_org_flag(tmp_path: Path) -> None:
+    """The single-org deployment stays as simple as it was."""
+    cfg = _cfg_file(tmp_path)
+    result = runner.invoke(app, ["stats", "--config", str(cfg)])
+    assert result.exit_code == 0

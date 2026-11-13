@@ -1,72 +1,107 @@
 # ──────────────────────────────────────────────────────────────────────
 # Ingstr configuration — example
 #
-# One config = one organisation (brief §2). Multi-org deployments run
-# multiple Ingstr containers, each with their own config + Qdrant
-# collection + state volume.
+# ONE CONFIGURATION, EVERY ORG (v0.2.0). The estate runs one deployment
+# and one container per org per run, with only that org's folder mounted
+# (the one-search-service design, accepted 2026-11-13). Everything
+# per-org is under `orgs:`; everything shared is below it.
 #
-# All paths in this file are CONTAINER-INTERNAL. The compose.yml that
-# accompanies this config decides what backs them on the host (NFS
-# volume, host bind mount, etc.).
+# `ingstr ingest --org arc`. With exactly one org listed, --org may be
+# omitted. With more than one it is required: the org decides what is
+# read and what is written, and a value like that is declared or the
+# tool stops (constitution §11).
+#
+# All paths here are CONTAINER-INTERNAL. The compose.yml beside this
+# file decides what backs them on the host.
 # ──────────────────────────────────────────────────────────────────────
 
-org: arc                                  # logging label only
+orgs:
+  - org: arc
 
-# ── What to ingest ───────────────────────────────────────────────────
-# `source.root` is the container-internal mount point for this org's
-# data share. Production deploys mount the org's NFS share here from
-# inside the container (so the host filesystem stays clean of org data).
-source:
-  root: /mnt/data
-  follow_symlinks: false
-  exclude_patterns:                       # gitignore-style globs
-    - "**/.tmp/**"
-    - "**/~$*"
-    - "**/Thumbs.db"
+    # ── What to ingest ───────────────────────────────────────────────
+    # The container-internal mount point for this org's data share.
+    # Production mounts the org's NFS share here from inside the
+    # container, so the host filesystem stays clean of org data.
+    source:
+      root: /mnt/data
+      follow_symlinks: false
+      exclude_patterns:                 # gitignore-style globs
+        - "**/.tmp/**"
+        - "**/~$*"
+        - "**/Thumbs.db"
+
+    # ── Where to store ───────────────────────────────────────────────
+    # Per-org Qdrant collection on a per-org Qdrant container. No
+    # published ports: the per-org Docker network is the only path in.
+    qdrant:
+      url: http://qdrant_arc:6333
+      api_key_env: QDRANT_RW_API_KEY    # name of env var holding the key
+      collection: documents
+      upsert_batch_size: 64
+      timeout_seconds: 30
+
+    # ── State tracking ───────────────────────────────────────────────
+    # One state database PER ORG, so re-indexing one org never touches
+    # another. Backed by a per-org named Docker volume.
+    state:
+      db_path: /var/lib/ingstr/state.db
+
+    # ── Agent surfaces (ADR-0010 §7) ─────────────────────────────────
+    # Optional. `root` has no default on purpose: a wrong-but-plausible
+    # mount root resolves to a real place on the wrong machine and
+    # succeeds. Leave the whole section out when not reading agent data.
+    # agent_source:
+    #   root: /mnt/agent-hosts/otter
+    #   purge_threshold: 0.5
+    #   surfaces: [memory, sessions, scratch]
+
+  # A second org is another entry, with its own folder, collection and
+  # state database. It is NOT a second deployment.
+  # - org: job
+  #   source:
+  #     root: /mnt/data
+  #   qdrant:
+  #     url: http://qdrant_job:6333
+  #     api_key_env: QDRANT_RW_API_KEY
+  #     collection: documents
+  #   state:
+  #     db_path: /var/lib/ingstr/state.db
+
+# ── Shared by every org below here ───────────────────────────────────
 
 # ── Where to find classification metadata ────────────────────────────
-# `compiled_plan.yml` and `group_gid_map.yml` come from upstream
-# (rbac-compile + export_group_gids.yml). They are shared across all
-# orgs on a given host: the registry is mounted on otter at /mnt/registry
-# and bind-mounted into each container at the same path.
-# Ingstr only reads — never generates or mutates.
+# compiled_plan.yml and group_gid_map.yml come from upstream
+# (rbac-compile; the estate's group assignment). One registry for the
+# whole host, mounted read-only. Ingstr only reads — never writes.
+#
+# Since contract 0.11 the plan also states each group's org, and a run
+# takes only its own org's group ids. A plan that cannot be read stops
+# the run rather than proceeding with none.
 plan:
   compiled_plan_path: /mnt/registry/compiled_plan.yml
   group_gid_map_path: /mnt/registry/group_gid_map.yml
-  reload_on_run: true                     # re-read at the start of each run
+  reload_on_run: true                   # re-read at the start of each run
 
 # ── Where to embed ───────────────────────────────────────────────────
-# Ollama instance is shared across orgs on the same network.
-# vector_dim MUST match the Qdrant collection's vector size; mismatch
-# is a fail-fast condition at startup.
+# Shared across orgs. vector_dim MUST match the Qdrant collection's
+# vector size; a mismatch fails at startup rather than writing.
+# dprox MUST use the same endpoint and model, or search returns wrong
+# results with no error.
 embedding:
-  endpoint: http://172.16.32.32:11434
+  endpoint: http://172.16.32.30:11434
   model: nomic-embed-text
   vector_dim: 768
   timeout_seconds: 30
-  batch_size: 16                          # chunks per HTTP call
-
-# ── Where to store ───────────────────────────────────────────────────
-# Per-org Qdrant collection on a per-org Qdrant container. URL, API key
-# (via env var), and collection name are all org-specific and managed
-# by Ansible at deploy time.
-qdrant:
-  url: http://qdrant_arc:6333
-  api_key_env: QDRANT_RW_API_KEY          # name of env var holding the key
-  collection: documents
-  upsert_batch_size: 64
-  timeout_seconds: 30
+  batch_size: 16                        # chunks per HTTP call
 
 # ── How to chunk ─────────────────────────────────────────────────────
 chunking:
-  strategy: unstructured                  # only "unstructured" in MVP
-  chunk_size_chars: 2000                  # ~500 tokens
+  strategy: unstructured                # only "unstructured" in MVP
+  chunk_size_chars: 2000                # ~500 tokens
   chunk_overlap_chars: 200
 
 # ── Per-file-type parser routing (MVP: unstructured handles all) ─────
-# Each entry must match a per-format extra installed in the image — see
-# pyproject.toml's `unstructured[pdf,docx,pptx,xlsx,md,html]` dependency.
-# Adding a new file type here without its extra in pyproject = runtime error.
+# Each entry must match a per-format extra installed in the image.
 parsers:
   pdf:   unstructured
   docx:  unstructured
@@ -76,14 +111,8 @@ parsers:
   md:    unstructured
   html:  unstructured
 
-# ── State tracking ───────────────────────────────────────────────────
-# Container-internal path; backed by a per-org named Docker volume so
-# the SQLite DB persists across container churn.
-state:
-  db_path: /var/lib/ingstr/state.db
-
 # ── Logging ──────────────────────────────────────────────────────────
 logging:
-  level: INFO                             # DEBUG | INFO | WARNING | ERROR
-  format: json                            # json | text
-  log_full_query: false                   # never log file contents at INFO
+  level: INFO                           # DEBUG | INFO | WARNING | ERROR
+  format: json                          # json | text
+  log_full_query: false                 # never log file contents at INFO

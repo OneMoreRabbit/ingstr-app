@@ -18,8 +18,26 @@ class ResolvedPlan:
 
     gid_to_group: dict[int, str]
     required_groups: frozenset[str]
+    group_org: dict[str, str]
     plan_source_path: Path
     map_source_path: Path
+
+    def gids_for_org(self, org: str) -> frozenset[int]:
+        """The GIDs of the groups belonging to `org`.
+
+        A run reads one org's folder, so it needs only that org's groups
+        (one-search-service design, accepted 2026-11-13). Narrowing the
+        supplementary groups narrows what the process can read at all, which
+        is the point: the mount decides what is visible, this decides what is
+        readable, and the two then agree.
+        """
+        return frozenset(
+            gid for gid, name in self.gid_to_group.items()
+            if self.group_org.get(name) == org
+        )
+
+    def org_of_group(self, group: str) -> str | None:
+        return self.group_org.get(group)
 
 
 def load_plan(compiled_plan_path: Path, group_gid_map_path: Path) -> ResolvedPlan:
@@ -47,6 +65,7 @@ def load_plan(compiled_plan_path: Path, group_gid_map_path: Path) -> ResolvedPla
     ADR-0010 §6 layer 2 for the shape the fix takes.
     """
     required_groups = _load_required_groups(compiled_plan_path)
+    group_org = _load_group_orgs(compiled_plan_path, required_groups)
     name_to_gid = _load_group_gid_map(group_gid_map_path)
 
     unknown = sorted(set(name_to_gid) - required_groups)
@@ -76,6 +95,7 @@ def load_plan(compiled_plan_path: Path, group_gid_map_path: Path) -> ResolvedPla
     return ResolvedPlan(
         gid_to_group=gid_to_group,
         required_groups=frozenset(required_groups),
+        group_org=group_org,
         plan_source_path=compiled_plan_path,
         map_source_path=group_gid_map_path,
     )
@@ -89,6 +109,47 @@ def _load_required_groups(path: Path) -> set[str]:
             f"{path}: 'required_groups' must be a list of strings"
         )
     return set(groups)
+
+
+def _load_group_orgs(path: Path, required_groups: set[str]) -> dict[str, str]:
+    """Read each group's org from the plan's `groups[]` section.
+
+    `compiled-rbac-plan` 0.11 states a group's org outright so a consumer does
+    not parse it out of the group name (constitution §10). The section is
+    additive, so a plan without it is not an error here — a run that needs the
+    orgs says so itself, with a message naming the contract version.
+
+    Guarantee checked: `groups[].name` equals `required_groups`, element for
+    element. A plan that carries the section but disagrees with its own
+    `required_groups` is refused, because the two would then classify
+    differently depending on which a reader believed.
+    """
+    raw = _read_yaml(path)
+    rows = raw.get("groups")
+    if rows is None:
+        return {}
+    if not isinstance(rows, list):
+        raise PlanError(f"{path}: 'groups' must be a list of rows (compiled-rbac-plan 0.11)")
+    out: dict[str, str] = {}
+    for row in rows:
+        if not isinstance(row, dict):
+            raise PlanError(f"{path}: each 'groups' row must be a mapping, got {row!r}")
+        name, org = row.get("name"), row.get("org")
+        if not isinstance(name, str) or not isinstance(org, str):
+            raise PlanError(
+                f"{path}: each 'groups' row needs string 'name' and 'org', got {row!r}"
+            )
+        out[name] = org
+    named = set(out)
+    if named != required_groups:
+        missing = sorted(required_groups - named)
+        extra = sorted(named - required_groups)
+        raise PlanError(
+            f"{path}: 'groups' and 'required_groups' disagree "
+            f"(contract 0.11 guarantees they are equal element for element); "
+            f"missing from groups: {missing}; not in required_groups: {extra}"
+        )
+    return out
 
 
 def _load_group_gid_map(path: Path) -> dict[str, int]:
