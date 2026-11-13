@@ -318,7 +318,7 @@ def test_health_does_not_fail_an_org_with_no_grant_of_its_own(tmp_path: Path) ->
     cfg = tmp_path / "config.yml"
     cfg.write_text(
         _MIN_CFG.format(root=root, plan=plan, gid_map=gid_map, db=tmp_path / "s.db")
-        .replace("      root: {}".format(root), f"      root: {root}\n      plan_path: job/")
+        .replace(f"      root: {root}", f"      root: {root}\n      plan_path: job/")
     )
 
     result = runner.invoke(app, ["health", "--config", str(cfg)])
