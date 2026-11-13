@@ -138,14 +138,14 @@ def run_ingest(
             # down at exit 4: one file deleted mid-walk discarded every other
             # file's work. A file that cannot be read is that file's result.
             _log.warning("file_unreadable", source_path=abs_path, error=str(e))
-            _record_per_file_error(state, path, error=f"could not read: {e}")
+            _record_per_file_error(state, path, error=f"could not read: {e}", dry_run=dry_run)
             summary.files_errored += 1
             continue
         except UnclassifiableFile as e:
             _log.warning(
                 "file_unclassifiable", source_path=abs_path, gid=e.gid
             )
-            _record_per_file_error(state, path, error=str(e))
+            _record_per_file_error(state, path, error=str(e), dry_run=dry_run)
             summary.files_errored += 1
             continue
         except WrongOrgFile as e:
@@ -157,7 +157,7 @@ def run_ingest(
                 group_org=e.group_org,
                 run_org=e.run_org,
             )
-            _record_per_file_error(state, path, error=str(e))
+            _record_per_file_error(state, path, error=str(e), dry_run=dry_run)
             summary.files_errored += 1
             summary.files_wrong_org += 1
             continue
@@ -176,7 +176,7 @@ def run_ingest(
             continue
         except IngstrError as e:
             _log.error("file_failed", source_path=abs_path, error=str(e))
-            _record_per_file_error(state, path, error=str(e))
+            _record_per_file_error(state, path, error=str(e), dry_run=dry_run)
             summary.files_errored += 1
             continue
 
@@ -443,14 +443,15 @@ def _process_file(
                 now=group,
             )
             qdrant.set_classification_group(abs_path, group, indexed_at=_utc_now_iso())
-        _record_parse_failure(
-            state,
-            path,
-            error=str(e),
-            group=group,
-            stat_info=stat_info,
-            existing=existing,
-        )
+        if not dry_run:
+            _record_parse_failure(
+                state,
+                path,
+                error=str(e),
+                group=group,
+                stat_info=stat_info,
+                existing=existing,
+            )
         raise RecordedFileError(str(e)) from e
 
     # 4. embed (UpstreamUnavailable propagates)
@@ -540,10 +541,20 @@ def _build_point(
     )
 
 
-def _record_per_file_error(state: StateDB, path: Path, *, error: str) -> None:
+def _record_per_file_error(
+    state: StateDB, path: Path, *, error: str, dry_run: bool = False
+) -> None:
     """Record a per-file error against the file row without overwriting prior
     indexed state. If we have no prior record (file never succeeded), insert a
-    minimal placeholder so `ingstr stats` can report it as errored."""
+    minimal placeholder so `ingstr stats` can report it as errored.
+
+    A DRY RUN WRITES NOTHING HERE. `--dry-run` says "plan but do not write",
+    and until v0.2.1 that was true of Qdrant and false of the state database —
+    a dry run recorded failures, which is both a surprise and, since v0.2.1,
+    a way to leave the record disagreeing with the index.
+    """
+    if dry_run:
+        return
     abs_path = str(path.resolve())
     existing = state.get_file(abs_path)
 

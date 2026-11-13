@@ -839,3 +839,65 @@ def test_a_file_with_no_passages_moves_nothing(fs) -> None:
                    full=False, dry_run=False)
 
     qdrant.set_classification_group.assert_not_called()
+
+
+def test_a_dry_run_writes_no_file_record_at_all(fs) -> None:
+    """`--dry-run` says "plan but do not write", and until v0.2.1 that was
+    true of Qdrant and false of the state database.
+
+    arch's test, from the code rather than from running it (hub #13994):
+    index under one group, change the content and the group, dry run, then a
+    real run. If the dry run had written the record, the real run would skip
+    the file as "failed before, group matches" and the passages would keep
+    the old group for good.
+    """
+    cfg, plan, state, root = fs
+    f = _write(root / "doc.pdf", "original")
+    embedder, qdrant = _mock_embedder(), _mock_qdrant()
+
+    with patch("ingstr.pipeline.classify", return_value="group_a"), \
+         patch("ingstr.pipeline.parse_file", return_value=["el"]), \
+         patch("ingstr.pipeline.chunk_elements", return_value=[Chunk("c", 0, 1)]):
+        run_ingest(cfg, plan, state=state, embedder=embedder, qdrant=qdrant,
+                   full=False, dry_run=False)
+
+    f.write_text("content that will not parse")
+    before = state.get_file(str(f.resolve()))
+    assert before is not None and before.classification_group == "group_a"
+
+    with patch("ingstr.pipeline.classify", return_value="group_b"), \
+         patch("ingstr.pipeline.parse_file", side_effect=IngstrError("cannot parse")):
+        dry = run_ingest(cfg, plan, state=state, embedder=embedder, qdrant=qdrant,
+                         full=False, dry_run=True)
+
+    assert dry.files_errored == 1, "the dry run still reports what it found"
+    unchanged = state.get_file(str(f.resolve()))
+    assert unchanged == before, "the dry run wrote to the state database"
+
+    qdrant.set_classification_group.reset_mock()
+    with patch("ingstr.pipeline.classify", return_value="group_b"), \
+         patch("ingstr.pipeline.parse_file", side_effect=IngstrError("cannot parse")):
+        run_ingest(cfg, plan, state=state, embedder=embedder, qdrant=qdrant,
+                   full=False, dry_run=False)
+
+    qdrant.set_classification_group.assert_called_once()
+    assert qdrant.set_classification_group.call_args[0][1] == "group_b"
+    after = state.get_file(str(f.resolve()))
+    assert after is not None and after.classification_group == "group_b"
+
+
+def test_a_dry_run_records_no_unclassifiable_file_either(fs) -> None:
+    """The same rule for every per-file result, not only the new one."""
+    cfg, plan, state, root = fs
+    f = _write(root / "nogroup.pdf")
+    embedder, qdrant = _mock_embedder(), _mock_qdrant()
+
+    with patch(
+        "ingstr.pipeline.classify",
+        side_effect=UnclassifiableFile(f, gid=9999),
+    ):
+        summary = run_ingest(cfg, plan, state=state, embedder=embedder,
+                             qdrant=qdrant, full=False, dry_run=True)
+
+    assert summary.files_errored == 1
+    assert state.get_file(str(f.resolve())) is None

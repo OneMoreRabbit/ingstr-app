@@ -52,13 +52,13 @@ class WrongOrgFile(IngstrError):
 
 
 class RecordedFileError(IngstrError):
-    """A per-file failure already written to the state database by the step
-    that raised it, because only that step knew what to record.
+    """A per-file failure the raising step has already accounted for.
 
     A parse failure is recorded where the file's classification group is still
     in hand, so a later run can ask "is this the same file, under the same
-    image, with the same group?" before deciding not to try again. The caller
-    counts it and moves on; it must not record it a second time.
+    image, with the same group?" before deciding not to try again. In a dry
+    run nothing is written at all. Either way the caller counts it and moves
+    on, and must not write anything itself.
     """
 
     def __init__(self, message: str) -> None:

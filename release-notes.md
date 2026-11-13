@@ -47,6 +47,14 @@ and a refused removal can be asked about after the fact.
   passages of files whose access was taken away can still be found, and that
   question had no answer once the journal had rolled. It stops being printed
   once it is over, because a warning that never clears is one nobody reads.
+- **A dry run writes nothing to the state database.** `--dry-run` says "plan
+  but do not write", and until now that was true of Qdrant and false of the
+  state: a dry run recorded per-file failures. It no longer records anything
+  about a file — not a parse failure, not an unclassifiable one, not an
+  unreadable one — while still reporting everything it found. (A dry run does
+  still record the run itself, so `ingstr stats` shows it happened.) The
+  simplest rule was the right one, and it is the one the help text already
+  claimed.
 - **A parse failure no longer leaves passages under the wrong group.** A file
   indexed under one group, whose content then changes to something that will
   not parse and whose group has changed, has the group on its existing
