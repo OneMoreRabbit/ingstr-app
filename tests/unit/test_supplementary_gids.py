@@ -20,7 +20,7 @@ orgs:
     state: {{db_path: {db}}}
   - org: job
     source: {{root: {root}}}
-    qdrant: {{url: 'http://q', api_key_env: K, collection: c}}
+    qdrant: {{url: 'http://q', api_key_env: K, collection: c_job}}
     state: {{db_path: {db}}}
 plan:
   compiled_plan_path: {plan}

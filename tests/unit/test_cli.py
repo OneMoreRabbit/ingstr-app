@@ -240,7 +240,7 @@ orgs:
     qdrant:
       url: http://qdrant_job:6333
       api_key_env: QDRANT_RW_API_KEY
-      collection: documents
+      collection: documents_job
     state:
       db_path: {db}
 plan:
