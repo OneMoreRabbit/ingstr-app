@@ -357,11 +357,16 @@ def _process_file(
     # Hash unchanged → skip work, optionally refresh classification on group change
     if existing is not None and existing.content_hash == content_hash:
         if existing.classification_group == group:
-            if existing.last_error is not None:
+            if existing.last_error is not None and not dry_run:
                 # It failed at some point and is now back to content that was
                 # indexed successfully. The passages are there and correct, so
                 # the recorded failure is stale — clear it rather than count
                 # this file as errored for ever.
+                #
+                # Not in a dry run: "a dry run writes nothing about a file" is
+                # only true if it is true of every branch, and this one is
+                # easy to miss precisely because clearing a stale error looks
+                # harmless.
                 state.upsert_file(
                     FileRecord(
                         source_path=existing.source_path,

@@ -36,7 +36,7 @@ from ingstr.exceptions import (
 from ingstr.hashing import sha256_file
 from ingstr.pipeline import run_ingest
 from ingstr.plan import ResolvedPlan
-from ingstr.state import StateDB
+from ingstr.state import FileRecord, StateDB
 
 # ── Fixtures ────────────────────────────────────────────────────────────────
 
@@ -901,3 +901,52 @@ def test_a_dry_run_records_no_unclassifiable_file_either(fs) -> None:
 
     assert summary.files_errored == 1
     assert state.get_file(str(f.resolve())) is None
+
+
+def test_a_dry_run_does_not_even_clear_a_stale_error(fs) -> None:
+    """The last branch that wrote during a dry run (arch, hub #13996).
+
+    Clearing a stale failure looks harmless, which is why it was the one
+    left — but "a dry run writes nothing about a file" is only true if it is
+    true of every branch.
+    """
+    cfg, plan, state, root = fs
+    f = _write(root / "doc.pdf", "original")
+    embedder, qdrant = _mock_embedder(), _mock_qdrant()
+
+    with patch("ingstr.pipeline.classify", return_value="group_a"), \
+         patch("ingstr.pipeline.parse_file", return_value=["el"]), \
+         patch("ingstr.pipeline.chunk_elements", return_value=[Chunk("c", 0, 1)]):
+        run_ingest(cfg, plan, state=state, embedder=embedder, qdrant=qdrant,
+                   full=False, dry_run=False)
+
+    # Leave a stale failure on an otherwise unchanged, correctly indexed file.
+    indexed = state.get_file(str(f.resolve()))
+    assert indexed is not None
+    state.upsert_file(
+        FileRecord(
+            source_path=indexed.source_path,
+            content_hash=indexed.content_hash,
+            mtime=indexed.mtime,
+            size_bytes=indexed.size_bytes,
+            classification_group=indexed.classification_group,
+            chunk_count=indexed.chunk_count,
+            last_indexed_at=indexed.last_indexed_at,
+            last_error="an old failure",
+            failed_at_version="0.0.1",
+        )
+    )
+    before = state.get_file(str(f.resolve()))
+
+    with patch("ingstr.pipeline.classify", return_value="group_a"):
+        run_ingest(cfg, plan, state=state, embedder=embedder, qdrant=qdrant,
+                   full=False, dry_run=True)
+
+    assert state.get_file(str(f.resolve())) == before
+
+    with patch("ingstr.pipeline.classify", return_value="group_a"):
+        run_ingest(cfg, plan, state=state, embedder=embedder, qdrant=qdrant,
+                   full=False, dry_run=False)
+
+    after = state.get_file(str(f.resolve()))
+    assert after is not None and after.last_error is None
