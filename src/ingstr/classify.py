@@ -1,10 +1,17 @@
+import os
 from pathlib import Path
 
 from .exceptions import UnclassifiableFile, WrongOrgFile
 from .plan import ResolvedPlan
 
 
-def classify(path: Path, plan: ResolvedPlan, org: str) -> str:
+def classify(
+    path: Path,
+    plan: ResolvedPlan,
+    org: str,
+    *,
+    stat_info: os.stat_result | None = None,
+) -> str:
     """Resolve a file's filesystem GID to its canonical classification group.
 
     Raises UnclassifiableFile if the GID is not present in the resolved plan's
@@ -18,7 +25,10 @@ def classify(path: Path, plan: ResolvedPlan, org: str) -> str:
     0.11) no org is known for any group and this check cannot fire — the
     caller decides whether to require it.
     """
-    gid = path.stat().st_gid
+    # The caller usually has the stat already — it needs size and modified
+    # time for the same file in the same breath — so it passes it in rather
+    # than making the one syscall twice on every file of every run.
+    gid = (stat_info if stat_info is not None else path.stat()).st_gid
     try:
         group = plan.gid_to_group[gid]
     except KeyError:

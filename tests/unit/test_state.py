@@ -181,3 +181,203 @@ def test_underscores_in_a_path_are_not_wildcards(tmp_path: Path) -> None:
 
     assert db.count_files_under("/srv/agents/arc/agent_one/") == 1
     db.close()
+
+
+# ── v0.2.1 ─────────────────────────────────────────────────────────────────
+
+
+def test_an_older_image_can_still_read_this_database(tmp_path):
+    """A roll back must keep working.
+
+    v0.2.1 first added its state as new COLUMNS, and that breaks an older
+    image: v0.1.1 reads `SELECT * FROM files` and builds its record from the
+    row, so an added column is an unexpected field and it raises TypeError.
+    Measured, not assumed. New TABLES are simply not looked at, which is why
+    the state lives in them.
+    """
+    import sqlite3
+
+    db = tmp_path / "s.db"
+    state = StateDB(db)
+    try:
+        state.upsert_file(
+            FileRecord(
+                source_path="/mnt/data/a.pdf", content_hash="h", mtime=1.0,
+                size_bytes=2, classification_group="g", chunk_count=1,
+                last_indexed_at="t", last_error="broke", failed_at_version="0.2.1",
+            )
+        )
+        run_id = state.start_run(mode="full", started_at="t0")
+        state.finish_run(
+            run_id, finished_at="t1", files_seen=1, files_indexed=0,
+            files_skipped=0, files_errored=1, chunks_written=0, exit_code=3,
+            purge_refused_reason="would remove 900 of 1000",
+        )
+    finally:
+        state.close()
+
+    # What an older image does: SELECT * and build its record from the row.
+    conn = sqlite3.connect(db)
+    conn.row_factory = sqlite3.Row
+    try:
+        file_row = dict(conn.execute(
+            "SELECT * FROM files WHERE source_path = ?", ("/mnt/data/a.pdf",)
+        ).fetchone())
+        run_row = dict(conn.execute("SELECT * FROM runs LIMIT 1").fetchone())
+    finally:
+        conn.close()
+
+    older_file_fields = {
+        "source_path", "content_hash", "mtime", "size_bytes",
+        "classification_group", "chunk_count", "last_indexed_at", "last_error",
+    }
+    older_run_fields = {
+        "run_id", "started_at", "finished_at", "mode", "files_seen",
+        "files_indexed", "files_skipped", "files_errored", "chunks_written",
+        "exit_code",
+    }
+    assert set(file_row) == older_file_fields
+    assert set(run_row) == older_run_fields
+
+
+def test_a_database_from_an_earlier_version_is_read_unchanged(tmp_path):
+    """The other direction: v0.2.1 opening a database an older image wrote.
+    The side tables are created; the existing rows are untouched; a file that
+    failed under an older image has no recorded version, so it is tried once
+    more and then recorded properly."""
+    import sqlite3
+
+    db = tmp_path / "old.db"
+    conn = sqlite3.connect(db)
+    conn.executescript(
+        """
+        CREATE TABLE files (
+            source_path TEXT PRIMARY KEY, content_hash TEXT NOT NULL,
+            mtime REAL NOT NULL, size_bytes INTEGER NOT NULL,
+            classification_group TEXT NOT NULL, chunk_count INTEGER NOT NULL,
+            last_indexed_at TEXT NOT NULL, last_error TEXT);
+        CREATE TABLE runs (
+            run_id INTEGER PRIMARY KEY AUTOINCREMENT, started_at TEXT NOT NULL,
+            finished_at TEXT, mode TEXT NOT NULL, files_seen INTEGER,
+            files_indexed INTEGER, files_skipped INTEGER, files_errored INTEGER,
+            chunks_written INTEGER, exit_code INTEGER);
+        INSERT INTO files VALUES ('/mnt/data/a.pdf', 'h', 1.0, 2, 'g', 1, 'then', 'broke');
+        """
+    )
+    conn.commit()
+    conn.close()
+
+    state = StateDB(db)
+    try:
+        record = state.get_file("/mnt/data/a.pdf")
+        assert record is not None
+        assert record.last_error == "broke"
+        assert record.failed_at_version is None
+        assert state.outstanding_refused_removal() is None
+    finally:
+        state.close()
+
+
+def test_a_refused_removal_is_findable_after_the_run(tmp_path):
+    """A refusal is a state, not a moment: until it is cleared, passages of
+    files whose access was taken away can still be found. Before v0.2.1 it
+    existed only in one run's stderr."""
+    state = StateDB(tmp_path / "s.db")
+    try:
+        run_id = state.start_run(mode="full", started_at="t0")
+        state.finish_run(
+            run_id, finished_at="t1", files_seen=1, files_indexed=0,
+            files_skipped=0, files_errored=0, chunks_written=0, exit_code=3,
+            purge_refused_reason="would remove 900 of 1000",
+            reached_removal_step=True,
+        )
+        refused = state.outstanding_refused_removal()
+        assert refused is not None
+        assert refused.purge_refused_reason == "would remove 900 of 1000"
+        assert refused.run_id == run_id
+    finally:
+        state.close()
+
+
+def test_a_run_that_removed_normally_is_not_reported_as_refused(tmp_path):
+    state = StateDB(tmp_path / "s.db")
+    try:
+        run_id = state.start_run(mode="full", started_at="t0")
+        state.finish_run(
+            run_id, finished_at="t1", files_seen=1, files_indexed=1,
+            files_skipped=0, files_errored=0, chunks_written=2, exit_code=0,
+        )
+        assert state.outstanding_refused_removal() is None
+    finally:
+        state.close()
+
+
+def test_a_refusal_stops_being_reported_once_a_later_run_removes(tmp_path):
+    """A warning that never clears is one nobody reads — and this is the one
+    the estate is asked to act on the same day. Once a later run has reached
+    the removal step and removed normally, the condition is over."""
+    state = StateDB(tmp_path / "s.db")
+    try:
+        refused_run = state.start_run(mode="full", started_at="t0")
+        state.finish_run(
+            refused_run, finished_at="t1", files_seen=1, files_indexed=0,
+            files_skipped=0, files_errored=0, chunks_written=0, exit_code=3,
+            purge_refused_reason="would remove 900 of 1000",
+            reached_removal_step=True,
+        )
+        assert state.outstanding_refused_removal() is not None
+
+        clean_run = state.start_run(mode="full", started_at="t2")
+        state.finish_run(
+            clean_run, finished_at="t3", files_seen=1, files_indexed=1,
+            files_skipped=0, files_errored=0, chunks_written=1, exit_code=0,
+            reached_removal_step=True,
+        )
+        assert state.outstanding_refused_removal() is None
+    finally:
+        state.close()
+
+
+def test_a_run_that_never_reached_the_removal_step_neither_raises_nor_clears(tmp_path):
+    """An incremental run, or one that aborted on an upstream fault, says
+    nothing about whether a removal is outstanding."""
+    state = StateDB(tmp_path / "s.db")
+    try:
+        refused_run = state.start_run(mode="full", started_at="t0")
+        state.finish_run(
+            refused_run, finished_at="t1", files_seen=1, files_indexed=0,
+            files_skipped=0, files_errored=0, chunks_written=0, exit_code=3,
+            purge_refused_reason="would remove 900 of 1000",
+            reached_removal_step=True,
+        )
+        incremental = state.start_run(mode="incremental", started_at="t2")
+        state.finish_run(
+            incremental, finished_at="t3", files_seen=1, files_indexed=0,
+            files_skipped=1, files_errored=0, chunks_written=0, exit_code=0,
+        )
+        assert state.outstanding_refused_removal() is not None
+    finally:
+        state.close()
+
+
+def test_forgetting_a_file_forgets_its_failure_too(tmp_path):
+    state = StateDB(tmp_path / "s.db")
+    try:
+        state.upsert_file(
+            FileRecord(
+                source_path="/x/a.pdf", content_hash="", mtime=1.0, size_bytes=2,
+                classification_group="g", chunk_count=0, last_indexed_at="t",
+                last_error="broke", failed_at_version="0.2.1",
+            )
+        )
+        state.delete_file("/x/a.pdf")
+        state.upsert_file(
+            FileRecord(
+                source_path="/x/a.pdf", content_hash="h", mtime=2.0, size_bytes=3,
+                classification_group="g", chunk_count=1, last_indexed_at="t2",
+            )
+        )
+        record = state.get_file("/x/a.pdf")
+        assert record is not None and record.failed_at_version is None
+    finally:
+        state.close()

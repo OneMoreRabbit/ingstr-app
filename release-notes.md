@@ -12,6 +12,80 @@ Newest first. One entry per release tag, written in the same commit that cuts th
 tag. Plain English: a reader skimming this page should know what changed and
 whether they have to act.
 
+## v0.2.1 — 2026-11-13
+
+**TL;DR:** an unchanged run was taking 6 minutes 24 seconds on otter, five of
+them re-parsing 520 files that had failed and would fail again. A failure is
+now recorded once. Also: one file vanishing mid-run no longer stops the run,
+and a refused removal can be asked about after the fact.
+
+- **A file that failed TO PARSE is not tried again** while its size, its
+  modified time, its classification group and the ingstr version are all
+  unchanged. `--full` tries every failure again, so the nightly run stays the
+  thorough one.
+- **Only parse failures are recorded that way.** A file refused for its group
+  — not in the plan, or another org's — is classified again on every run,
+  because that refusal belongs to the plan and not to the file: a `chgrp`
+  changes neither size nor modified time, and a new plan or a new grant
+  changes nothing in the file at all. So giving a folder a group, or adding a
+  grant, is still picked up by the next ordinary run. A file that could not be
+  read for a moment is tried again too.
+- **The version is part of that** on purpose. The common failures are facts
+  about the image, not about the file — "tesseract is not installed" is one —
+  so a record that never expired would mean those files are never retried
+  after the image gains what they needed. An upgrade retries them with nobody
+  remembering to.
+- **A skipped failure still counts as errored**, with its recorded reason, and
+  the exit code stays 3. A run is not healthier for having skipped it.
+- **A file that vanishes or becomes unreadable mid-run is that file's
+  result**, not the run's. Before this, one file deleted between being listed
+  and being hashed raised `FileNotFoundError` out of the loop and ended the
+  run at exit 4, discarding every other file's work.
+- **A refused removal is kept** in the run record and shown by `ingstr stats`
+  **while it is outstanding** — that is, until a later run reaches the removal
+  step and removes normally. It is a state, not a moment: until it is cleared,
+  passages of files whose access was taken away can still be found, and that
+  question had no answer once the journal had rolled. It stops being printed
+  once it is over, because a warning that never clears is one nobody reads.
+- **A dry run writes nothing to the state database.** `--dry-run` says "plan
+  but do not write", and until now that was true of Qdrant and false of the
+  state: a dry run recorded per-file failures. It no longer records anything
+  about a file — not a parse failure, not an unclassifiable one, not an
+  unreadable one — while still reporting everything it found. (A dry run does
+  still record the run itself, so `ingstr stats` shows it happened.) The
+  simplest rule was the right one, and it is the one the help text already
+  claimed.
+- **A parse failure no longer leaves passages under the wrong group.** A file
+  indexed under one group, whose content then changes to something that will
+  not parse and whose group has changed, has the group on its existing
+  passages refreshed before the failure is recorded. Nothing else in a run
+  would have fixed it: the hash no longer matches, so the refresh branch is
+  not reached, and the parse that would re-index it cannot succeed. The index
+  follows access in every run, whether or not the file can be read.
+- **Two orgs may not write to one collection.** Same Qdrant with different
+  collections is fine; different Qdrant with the same collection name is
+  fine. Sharing one would not collide, since a passage id carries its org —
+  the points would simply sit together, and the first sign would be one org's
+  passage returned to the other's reader.
+
+**What a timer run no longer notices**, until the nightly `--full`:
+
+- a file that failed to parse, was then changed with its size and modified
+  time preserved, and would now parse;
+- a changed setting that would let a failed file parse — when the page limit
+  or the language list arrive, raising either does not retry failures until
+  the nightly run or the next version.
+
+**Rolling back is safe.** This release keeps its new state in new tables, not
+in new columns on the existing ones. An older image reads `SELECT * FROM
+files` and builds its record from the row, so a column added here would make
+v0.1.1 raise `TypeError` on the first file it looked at — measured, not
+assumed. A table it does not know about is simply never read.
+
+**Action:** none. A database written by an earlier image is read unchanged,
+and a file that failed under one has no recorded version, so it is tried once
+more and then recorded properly.
+
 ## v0.2.0 — 2026-11-13
 
 **TL;DR:** one configuration lists every org and a run reads one of them; a

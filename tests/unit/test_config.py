@@ -219,3 +219,33 @@ def test_empty_orgs_list_is_rejected(tmp_yaml):
     yaml_text = _MINIMAL_YAML.split("plan:", 1)[1]
     with pytest.raises(ConfigError):
         load_config(tmp_yaml("c.yml", "orgs: []\nplan:" + yaml_text))
+
+
+def test_two_orgs_sharing_one_collection_are_refused(tmp_yaml):
+    """An org's passages stay in their own collection; that is what stops a
+    filter mistake crossing orgs. Sharing one would not collide — a passage id
+    carries its org — so the points would sit together, correctly keyed and
+    wrongly placed, and the first sign would be one org's passage returned to
+    the other's reader (dprox, hub #13875)."""
+    shared = _TWO_ORGS_YAML.replace("http://qdrant_job:6333", "http://qdrant_arc:6333")
+    with pytest.raises(ConfigError, match="own collection"):
+        load_config(tmp_yaml("c.yml", shared))
+
+
+def test_same_qdrant_different_collections_is_allowed(tmp_yaml):
+    """The shape the one-search-service design moves toward: one server, one
+    collection for each org."""
+    one_server = _TWO_ORGS_YAML.replace("http://qdrant_job:6333", "http://qdrant_arc:6333")
+    one_server = one_server.replace(
+        "      collection: documents\n    state:\n      db_path: /var/lib/ingstr/job/state.db",
+        "      collection: documents_job\n    state:\n      db_path: /var/lib/ingstr/job/state.db",
+    )
+    cfg = load_config(tmp_yaml("c.yml", one_server))
+    assert cfg.org_names == ["arc", "job"]
+
+
+def test_different_qdrant_same_collection_name_is_allowed(tmp_yaml):
+    """Today's shape: one container per org, every collection called
+    `documents`."""
+    cfg = load_config(tmp_yaml("c.yml", _TWO_ORGS_YAML))
+    assert [o.qdrant.collection for o in cfg.orgs] == ["documents", "documents"]

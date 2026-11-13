@@ -42,6 +42,51 @@ CREATE TABLE IF NOT EXISTS runs (
     chunks_written  INTEGER,
     exit_code       INTEGER
 );
+
+-- v0.2.1 adds its state in NEW TABLES rather than new columns, deliberately.
+--
+-- An older image reads `SELECT * FROM files` and builds its record from the
+-- row, so a column this version added is an unexpected field and the older
+-- image CRASHES. Measured against v0.1.1: TypeError, FileRecord got an
+-- unexpected keyword argument. A new table is simply not looked at, so a roll
+-- back keeps working — which is what the estate needs from a roll back.
+
+-- Which image recorded a file's failure, for the failures that are a property
+-- of the file and the image together — a parse that cannot succeed until one
+-- of them changes. Re-parsing 520 of these every five minutes was five of the
+-- six minutes an unchanged run took on otter.
+--
+-- Keyed to the version because these failures are often facts about the
+-- IMAGE: "tesseract is not installed" is one. A record that never expired
+-- would mean the 213 scanned PDFs are never retried after tesseract is added,
+-- by anyone, ever. An upgrade retries them with nobody remembering to.
+--
+-- A failure that is a property of the PLAN — unclassifiable, another org's
+-- group — is NEVER recorded here: a chgrp or a new plan changes neither the
+-- file nor the image, so such a file must be classified again on every run.
+CREATE TABLE IF NOT EXISTS file_failures (
+    source_path       TEXT PRIMARY KEY,
+    failed_at_version TEXT NOT NULL,
+    recorded_at       TEXT NOT NULL
+);
+
+-- One row per run that REACHED the removal step, with the reason if it
+-- refused and NULL if it removed normally.
+--
+-- A refusal is a state, not a moment: until it is cleared, passages of files
+-- whose access was taken away can still be found, and that question had no
+-- answer once the journal had rolled. But it must stop being reported once a
+-- later run has done the removal — a warning that never clears stops being
+-- read, and the estate is asked to act on this one the same day. Hence the
+-- rows for the clean runs too: without them there is nothing to say the
+-- refusal is over.
+--
+-- A run that never reached the step (it aborted on an upstream fault) writes
+-- no row and therefore neither raises nor clears anything.
+CREATE TABLE IF NOT EXISTS run_removals (
+    run_id         TEXT PRIMARY KEY,
+    refused_reason TEXT
+);
 """
 
 
@@ -67,6 +112,10 @@ class FileRecord:
     chunk_count: int
     last_indexed_at: str
     last_error: str | None = None
+    #: The ingstr version that recorded `last_error`, or None when the record
+    #: is not a failure (or predates v0.2.1). Compared against the running
+    #: version to decide whether a failure is worth trying again.
+    failed_at_version: str | None = None
 
 
 @dataclass(frozen=True)
@@ -81,6 +130,11 @@ class RunRecord:
     files_errored: int | None
     chunks_written: int | None
     exit_code: int | None
+    #: Set when this run refused to remove passages because too much had
+    #: vanished at once. Kept so the refusal can be asked about later: until
+    #: it is cleared, passages of files whose access was taken away can still
+    #: be found. None on runs that removed normally or removed nothing.
+    purge_refused_reason: str | None = None
 
 
 class StateDB:
@@ -113,7 +167,13 @@ class StateDB:
     def get_file(self, source_path: str) -> FileRecord | None:
         with self._cursor() as cur:
             row = cur.execute(
-                "SELECT * FROM files WHERE source_path = ?", (source_path,)
+                """
+                SELECT files.*, file_failures.failed_at_version
+                FROM files
+                LEFT JOIN file_failures USING (source_path)
+                WHERE files.source_path = ?
+                """,
+                (source_path,),
             ).fetchone()
         return FileRecord(**dict(row)) if row else None
 
@@ -145,10 +205,33 @@ class StateDB:
                     record.last_error,
                 ),
             )
+            if record.failed_at_version is None:
+                cur.execute(
+                    "DELETE FROM file_failures WHERE source_path = ?",
+                    (record.source_path,),
+                )
+            else:
+                cur.execute(
+                    """
+                    INSERT INTO file_failures (source_path, failed_at_version, recorded_at)
+                    VALUES (?, ?, ?)
+                    ON CONFLICT(source_path) DO UPDATE SET
+                        failed_at_version = excluded.failed_at_version,
+                        recorded_at       = excluded.recorded_at
+                    """,
+                    (record.source_path, record.failed_at_version, record.last_indexed_at),
+                )
 
     def delete_file(self, source_path: str) -> None:
+        """Forget a file entirely — both its record and any failure recorded
+        against it. Leaving the failure row behind is harmless today, since
+        the next record for that path overwrites it, but a half-deleted file
+        is the kind of thing that is true until it isn't."""
         with self._cursor() as cur:
             cur.execute("DELETE FROM files WHERE source_path = ?", (source_path,))
+            cur.execute(
+                "DELETE FROM file_failures WHERE source_path = ?", (source_path,)
+            )
 
     def all_paths(self) -> set[str]:
         with self._cursor() as cur:
@@ -243,10 +326,37 @@ class StateDB:
         where = " AND ".join(clauses)
         with self._cursor() as cur:
             row = cur.execute(
-                f"SELECT * FROM runs WHERE {where} ORDER BY run_id DESC LIMIT 1",
+                f"""
+                SELECT runs.*, run_removals.refused_reason AS purge_refused_reason
+                FROM runs
+                LEFT JOIN run_removals ON run_removals.run_id = CAST(runs.run_id AS TEXT)
+                WHERE {where} ORDER BY runs.run_id DESC LIMIT 1
+                """,
                 params,
             ).fetchone()
         return RunRecord(**dict(row)) if row else None
+
+    def outstanding_refused_removal(self) -> RunRecord | None:
+        """The refused removal still outstanding, if there is one.
+
+        Outstanding means: the LAST run to reach the removal step refused. A
+        later run that reached it and removed normally has cleared the
+        condition, and reporting it after that would be a warning that never
+        goes away — which is a warning nobody reads, on the one condition the
+        estate is asked to act on the same day.
+        """
+        with self._cursor() as cur:
+            row = cur.execute(
+                """
+                SELECT runs.*, run_removals.refused_reason AS purge_refused_reason
+                FROM run_removals
+                JOIN runs ON CAST(runs.run_id AS TEXT) = run_removals.run_id
+                ORDER BY runs.run_id DESC LIMIT 1
+                """
+            ).fetchone()
+        if row is None or row["purge_refused_reason"] is None:
+            return None
+        return RunRecord(**dict(row))
 
     def finish_run(
         self,
@@ -259,6 +369,8 @@ class StateDB:
         files_errored: int,
         chunks_written: int,
         exit_code: int,
+        purge_refused_reason: str | None = None,
+        reached_removal_step: bool = False,
     ) -> None:
         with self._cursor() as cur:
             cur.execute(
@@ -284,3 +396,10 @@ class StateDB:
                     run_id,
                 ),
             )
+            if reached_removal_step:
+                cur.execute(
+                    "INSERT INTO run_removals (run_id, refused_reason) VALUES (?, ?) "
+                    "ON CONFLICT(run_id) DO UPDATE SET "
+                    "refused_reason = excluded.refused_reason",
+                    (str(run_id), purge_refused_reason),
+                )

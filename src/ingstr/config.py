@@ -166,6 +166,34 @@ class IngstrConfig(BaseModel):
             raise ValueError(f"duplicate org name(s) in 'orgs': {duplicates}")
         return v
 
+    @field_validator("orgs")
+    @classmethod
+    def _orgs_do_not_share_a_collection(cls, v: list[OrgConfig]) -> list[OrgConfig]:
+        """Two orgs pointing at the same collection on the same Qdrant is
+        refused.
+
+        An org's passages stay in their own collection, and that is what makes
+        a filter mistake unable to cross orgs. Sharing one would not even show
+        up as a collision now that a passage id carries its org — the two orgs'
+        points would simply sit together, correctly keyed and wrongly placed,
+        and the first sign would be one org's passage returned to the other's
+        reader. Cheap to refuse, invisible to find later.
+
+        Same Qdrant, different collections: fine. Different Qdrant, same
+        collection name: fine — that is the normal shape.
+        """
+        seen: dict[tuple[str, str], str] = {}
+        for org in v:
+            key = (org.qdrant.url, org.qdrant.collection)
+            if key in seen:
+                raise ValueError(
+                    f"orgs {seen[key]!r} and {org.org!r} both write to collection "
+                    f"{org.qdrant.collection!r} on {org.qdrant.url} — an org's "
+                    "passages must stay in their own collection"
+                )
+            seen[key] = org.org
+        return v
+
     @property
     def org_names(self) -> list[str]:
         return [o.org for o in self.orgs]

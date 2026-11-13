@@ -8,6 +8,7 @@ from pathlib import Path
 import pathspec
 import structlog
 
+from . import __version__
 from .availability import DEFAULT_PURGE_THRESHOLD, assess_purge
 from .chunk import Chunk, chunk_elements
 from .classify import classify
@@ -16,6 +17,7 @@ from .embed import EmbeddingClient
 from .exceptions import (
     ConfigError,
     IngstrError,
+    RecordedFileError,
     UnclassifiableFile,
     UpstreamUnavailable,
     WrongOrgFile,
@@ -53,6 +55,14 @@ class RunSummary:
     #: from files_errored so "this org's folder holds another org's data" is
     #: visible as itself rather than buried in a parse-failure total.
     files_wrong_org: int = 0
+    #: Files that failed before, are unchanged, and were not tried again. They
+    #: are counted in files_errored too: the run is not healthier for having
+    #: skipped them. This number says how much of the error count was carried
+    #: rather than discovered.
+    files_failed_skipped: int = 0
+    #: True when the run reached the step that removes passages. A run that
+    #: aborted before it neither raises a refusal nor clears one.
+    reached_removal_step: bool = False
     chunks_written: int = 0
     files_deleted: int = 0
     #: Set when ADR-0010 §6 layer 3 refused a purge. The run keeps whatever it
@@ -69,7 +79,13 @@ class _ProcessOutcome:
     counters without re-deriving from per-step exceptions."""
 
     action: str  # "ingest" | "skip_unchanged" | "payload_refresh" | "dry_run"
+    #             | "skip_failed"
     chunks: int = 0
+    #: Set only for "skip_failed": the error this file recorded when it last
+    #: failed. Carried so the run summary can count it as errored WITH its
+    #: reason — a skipped failure must not make a run look healthier than it
+    #: is, and the exit code stays 3.
+    recorded_error: str | None = None
 
 
 def run_ingest(
@@ -115,11 +131,21 @@ def run_ingest(
                 full=full,
                 dry_run=dry_run,
             )
+        except OSError as e:
+            # The file was listed and is now unreadable or gone — a race with
+            # whatever writes this tree, and ordinary on a live share. Before
+            # v0.2.1 this escaped to the fatal handler and took the whole run
+            # down at exit 4: one file deleted mid-walk discarded every other
+            # file's work. A file that cannot be read is that file's result.
+            _log.warning("file_unreadable", source_path=abs_path, error=str(e))
+            _record_per_file_error(state, path, error=f"could not read: {e}", dry_run=dry_run)
+            summary.files_errored += 1
+            continue
         except UnclassifiableFile as e:
             _log.warning(
                 "file_unclassifiable", source_path=abs_path, gid=e.gid
             )
-            _record_per_file_error(state, path, error=str(e))
+            _record_per_file_error(state, path, error=str(e), dry_run=dry_run)
             summary.files_errored += 1
             continue
         except WrongOrgFile as e:
@@ -131,7 +157,7 @@ def run_ingest(
                 group_org=e.group_org,
                 run_org=e.run_org,
             )
-            _record_per_file_error(state, path, error=str(e))
+            _record_per_file_error(state, path, error=str(e), dry_run=dry_run)
             summary.files_errored += 1
             summary.files_wrong_org += 1
             continue
@@ -141,13 +167,30 @@ def run_ingest(
             # Must come BEFORE the IngstrError handler since UpstreamUnavailable
             # is a subclass.
             raise
+        except RecordedFileError as e:
+            # Already written to the state database, with the group and the
+            # version, by the step that knew them. Count it; do not record it
+            # twice.
+            _log.error("file_failed", source_path=abs_path, error=str(e))
+            summary.files_errored += 1
+            continue
         except IngstrError as e:
             _log.error("file_failed", source_path=abs_path, error=str(e))
-            _record_per_file_error(state, path, error=str(e))
+            _record_per_file_error(state, path, error=str(e), dry_run=dry_run)
             summary.files_errored += 1
             continue
 
-        if outcome.action == "skip_unchanged":
+        if outcome.action == "skip_failed":
+            # Not re-tried, still broken. It counts as errored, with the
+            # reason it recorded, so the run reports what is true.
+            _log.info(
+                "file_failed_before",
+                source_path=abs_path,
+                error=outcome.recorded_error,
+            )
+            summary.files_errored += 1
+            summary.files_failed_skipped += 1
+        elif outcome.action == "skip_unchanged":
             summary.files_skipped += 1
         elif outcome.action == "payload_refresh":
             summary.files_indexed += 1
@@ -160,6 +203,7 @@ def run_ingest(
             summary.chunks_written += outcome.chunks
 
     if full and not dry_run:
+        summary.reached_removal_step = True
         known = state.all_paths()
         orphans = sorted(known - seen)
 
@@ -250,14 +294,60 @@ def _process_file(
     abs_path = str(path.resolve())
     rel_path = path.relative_to(cfg.source.root).as_posix()
 
-    # 1. classify (raises UnclassifiableFile)
-    group = classify(path, plan, cfg.org)
-
-    # 2. hash + stat
+    existing = state.get_file(abs_path)
     stat_info = path.stat()
+
+    # 1. classify (raises UnclassifiableFile / WrongOrgFile)
+    #
+    #    BEFORE the skip below, deliberately. A file refused for its group is
+    #    refused by the PLAN, not by anything about the file: a chgrp changes
+    #    neither size nor modified time, and a new plan or a new grant changes
+    #    nothing in the file at all. Classifying first is what lets the estate
+    #    give a folder a group, or add a grant, and have the next ordinary run
+    #    pick the files up instead of waiting for 03:00.
+    group = classify(path, plan, cfg.org, stat_info=stat_info)
+
+    # 0. A file that failed before, is unchanged, and failed under THIS version
+    #    is not tried again (v0.2.1).
+    #
+    #    Measured on otter: an unchanged run took 6m24s, of which reading and
+    #    hashing every indexed file was 70 seconds. The rest was re-parsing the
+    #    520 files that had failed and would fail again — every five minutes,
+    #    for as long as they sat there.
+    #
+    #    Keyed to the VERSION, not only to the file, because the common
+    #    failures are facts about the image rather than about the file:
+    #    "tesseract is not installed" is one. A record that never expired would
+    #    mean the 213 scanned PDFs are never retried after tesseract is added,
+    #    by anyone, ever. An upgrade retries them with nobody remembering to.
+    #
+    #    `--full` tries everything again regardless, which keeps the nightly
+    #    run the thorough one — the same division as elsewhere.
+    #
+    #    A record from before v0.2.1 has no version, so it is retried once and
+    #    then recorded properly. That is the right answer, not a special case.
+    #    The group is part of the comparison for the same reason: a file that
+    #    could not be parsed under one classification should be looked at
+    #    again if its classification changes, because that is a different
+    #    question about a different audience.
+    if (
+        not full
+        and existing is not None
+        and existing.last_error is not None
+        and existing.failed_at_version == __version__
+        and existing.classification_group == group
+        and existing.mtime == stat_info.st_mtime
+        and existing.size_bytes == stat_info.st_size
+    ):
+        return _ProcessOutcome(
+            action="skip_failed",
+            chunks=0,
+            recorded_error=existing.last_error,
+        )
+
+    # 2. hash
     content_hash = sha256_file(path)
 
-    existing = state.get_file(abs_path)
     now_iso = _utc_now_iso()
     mtime_iso = (
         datetime.fromtimestamp(stat_info.st_mtime, tz=UTC).isoformat()
@@ -267,6 +357,29 @@ def _process_file(
     # Hash unchanged → skip work, optionally refresh classification on group change
     if existing is not None and existing.content_hash == content_hash:
         if existing.classification_group == group:
+            if existing.last_error is not None and not dry_run:
+                # It failed at some point and is now back to content that was
+                # indexed successfully. The passages are there and correct, so
+                # the recorded failure is stale — clear it rather than count
+                # this file as errored for ever.
+                #
+                # Not in a dry run: "a dry run writes nothing about a file" is
+                # only true if it is true of every branch, and this one is
+                # easy to miss precisely because clearing a stale error looks
+                # harmless.
+                state.upsert_file(
+                    FileRecord(
+                        source_path=existing.source_path,
+                        content_hash=existing.content_hash,
+                        mtime=stat_info.st_mtime,
+                        size_bytes=stat_info.st_size,
+                        classification_group=existing.classification_group,
+                        chunk_count=existing.chunk_count,
+                        last_indexed_at=existing.last_indexed_at,
+                        last_error=None,
+                        failed_at_version=None,
+                    )
+                )
             return _ProcessOutcome(action="skip_unchanged", chunks=existing.chunk_count)
 
         # GID changed but content didn't. Refresh the payload field on every
@@ -295,10 +408,56 @@ def _process_file(
         return _ProcessOutcome(action="payload_refresh", chunks=existing.chunk_count)
 
     # 3. parse + chunk
-    elements = parse_file(path)  # IngstrError on failure
-    chunks = chunk_elements(elements, cfg.chunking)
-    if not chunks:
-        raise IngstrError(f"{path}: parsed but produced 0 chunks")
+    #
+    #    A failure here is recorded HERE rather than by the caller, because
+    #    only this scope knows the file's classification group — and the group
+    #    is part of what a later run compares before deciding not to try the
+    #    file again. It is also the only failure kind worth not trying again:
+    #    a parse cannot start succeeding until the file or the image changes,
+    #    while everything else (an unreadable moment, a group that is not in
+    #    the plan yet) can.
+    try:
+        elements = parse_file(path)  # IngstrError on failure
+        chunks = chunk_elements(elements, cfg.chunking)
+        if not chunks:
+            raise IngstrError(f"{path}: parsed but produced 0 chunks")
+    except UpstreamUnavailable:
+        raise  # systemic, not this file's fault — the run aborts
+    except IngstrError as e:
+        if (
+            not dry_run
+            and existing is not None
+            and existing.chunk_count > 0
+            and existing.classification_group != group
+        ):
+            # The file has passages carrying the OLD group, its content has
+            # changed to something that will not parse, and it has been
+            # re-classified. Nothing else in the run would ever fix that: the
+            # hash no longer matches, so the refresh branch is not reached,
+            # and the parse that would re-index it cannot succeed. The
+            # passages would sit under the old group for good — readable by
+            # the old audience — and if the old content ever came back they
+            # would look correct and stay wrong.
+            #
+            # The same rule as the removal ruling: the index follows access in
+            # every run, whether or not the file can be read.
+            _log.info(
+                "file_group_refreshed_on_failure",
+                source_path=abs_path,
+                was=existing.classification_group,
+                now=group,
+            )
+            qdrant.set_classification_group(abs_path, group, indexed_at=_utc_now_iso())
+        if not dry_run:
+            _record_parse_failure(
+                state,
+                path,
+                error=str(e),
+                group=group,
+                stat_info=stat_info,
+                existing=existing,
+            )
+        raise RecordedFileError(str(e)) from e
 
     # 4. embed (UpstreamUnavailable propagates)
     texts = [c.text for c in chunks]
@@ -387,34 +546,60 @@ def _build_point(
     )
 
 
-def _record_per_file_error(state: StateDB, path: Path, *, error: str) -> None:
+def _record_per_file_error(
+    state: StateDB, path: Path, *, error: str, dry_run: bool = False
+) -> None:
     """Record a per-file error against the file row without overwriting prior
     indexed state. If we have no prior record (file never succeeded), insert a
-    minimal placeholder so `ingstr stats` can report it as errored."""
+    minimal placeholder so `ingstr stats` can report it as errored.
+
+    A DRY RUN WRITES NOTHING HERE. `--dry-run` says "plan but do not write",
+    and until v0.2.1 that was true of Qdrant and false of the state database —
+    a dry run recorded failures, which is both a surprise and, since v0.2.1,
+    a way to leave the record disagreeing with the index.
+    """
+    if dry_run:
+        return
     abs_path = str(path.resolve())
     existing = state.get_file(abs_path)
-    if existing is not None:
-        state.upsert_file(
-            FileRecord(
-                source_path=existing.source_path,
-                content_hash=existing.content_hash,
-                mtime=existing.mtime,
-                size_bytes=existing.size_bytes,
-                classification_group=existing.classification_group,
-                chunk_count=existing.chunk_count,
-                last_indexed_at=existing.last_indexed_at,
-                last_error=error,
-            )
-        )
-        return
 
+    # The file AS IT IS NOW, not as it was when it last succeeded. v0.2.1
+    # decides whether to try a failure again by comparing the stored size and
+    # modified time against the file, so they have to describe the version
+    # that failed. Before v0.2.1 this branch kept the old values, which was
+    # how a file that once indexed and then broke was re-parsed on every run
+    # for ever.
     try:
         stat_info = path.stat()
         size = stat_info.st_size
         mtime = stat_info.st_mtime
     except OSError:
+        # Gone between failing and being recorded. Zeroes match no real file,
+        # so it is tried again if it comes back.
         size = 0
         mtime = 0.0
+
+    if existing is not None:
+        # The content hash and the passage count stay as they were: the file
+        # still HAS whatever was indexed from it, and a failure is not a
+        # reason to forget that.
+        state.upsert_file(
+            FileRecord(
+                source_path=existing.source_path,
+                content_hash=existing.content_hash,
+                mtime=mtime,
+                size_bytes=size,
+                classification_group=existing.classification_group,
+                chunk_count=existing.chunk_count,
+                last_indexed_at=existing.last_indexed_at,
+                last_error=error,
+                # No version: this kind of failure is not a property of the
+                # file and the image, so it is tried again on every run.
+                failed_at_version=None,
+            )
+        )
+        return
+
     state.upsert_file(
         FileRecord(
             source_path=abs_path,
@@ -425,6 +610,41 @@ def _record_per_file_error(state: StateDB, path: Path, *, error: str) -> None:
             chunk_count=0,
             last_indexed_at=_utc_now_iso(),
             last_error=error,
+            failed_at_version=None,
+        )
+    )
+
+
+def _record_parse_failure(
+    state: StateDB,
+    path: Path,
+    *,
+    error: str,
+    group: str,
+    stat_info: os.stat_result,
+    existing: FileRecord | None,
+) -> None:
+    """Record a parse failure with everything a later run needs to decide.
+
+    The file as it is NOW (size, modified time), the group it classified as,
+    and the version that could not read it. A run skips this file only while
+    all four still match — so a changed file, a re-classified file, or a new
+    image all get another attempt, and nothing else does.
+    """
+    abs_path = str(path.resolve())
+    state.upsert_file(
+        FileRecord(
+            source_path=abs_path,
+            # Whatever was indexed from this file before stays indexed; a
+            # failure to re-read it is not a reason to forget it.
+            content_hash=existing.content_hash if existing else "",
+            mtime=stat_info.st_mtime,
+            size_bytes=stat_info.st_size,
+            classification_group=group,
+            chunk_count=existing.chunk_count if existing else 0,
+            last_indexed_at=existing.last_indexed_at if existing else _utc_now_iso(),
+            last_error=error,
+            failed_at_version=__version__,
         )
     )
 
