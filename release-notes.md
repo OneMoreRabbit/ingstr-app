@@ -33,6 +33,10 @@ which **change what gets indexed**.
   loudly, rather than waiting for a length nobody chose.
 - `--dry-run`, `stats` and `health` take no lock. A dry run writes nothing,
   so it cannot race anything.
+- **ingstr's lock and the estate's do not meet**, by design: the estate's is
+  a file on the host beside `compose.yml`, ingstr's is beside the state
+  database inside the container. The wrapper stops a container being started
+  for nothing; ingstr refuses if one is started anyway.
 
 **Why it moved into ingstr.** On otter the two units carried `Conflicts=`,
 which *stops* the other unit rather than refusing the new one — so the
@@ -41,7 +45,9 @@ no orphan was ever removed, and nothing inside ingstr could see it because
 ingstr was never started. What the lock protects is ingstr's own state, so
 the guarantee belongs with the program.
 
-**New exit code 5** — "a full run could not get the org's run lock". None of
+**New exit code 5** — "a full run could not get the org's run lock". Not 75
+or 76: the estate's own lock wrapper uses those for the same two situations
+one layer up, and ingstr will not reuse them. None of
 the existing codes is true for it: nothing is misconfigured, no upstream is
 down, no file failed, nothing crashed. **The estate must alert on 5**: it
 means the thorough run did not happen.

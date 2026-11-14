@@ -55,6 +55,10 @@ _EXIT_UPSTREAM = 2
 _EXIT_PARTIAL = 3
 _EXIT_FATAL = 4
 #: A FULL run that waited for the org's run lock and never got it (v0.2.3).
+#: NOT 75 or 76: the estate's own lock wrapper around the units uses those
+#: for the same two situations one layer up (75 an ordinary run gave up, 76 a
+#: full run waited and failed), and two different things sharing a number is
+#: how a log is misread (arch, hub #14049).
 #: Its own code because none of the others is true: nothing is misconfigured,
 #: no upstream is down, no file failed, nothing crashed — the thorough run
 #: simply did not happen, and that is the one thing the estate must hear
