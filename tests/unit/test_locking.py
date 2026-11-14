@@ -3,8 +3,8 @@
 The asymmetry is the design, not an oversight: an ordinary run gives way and
 SUCCEEDS, because another run is already doing the work and nothing is wrong;
 a full run WAITS and fails if it never gets in, because a full run that gives
-way silently is exactly what happened on otter — the nightly run died one
-second after starting for 81 consecutive runs and nothing said so.
+way silently is exactly what happened on otter — the one nightly run due since the restore
+was stopped a second after it started, and nothing said so.
 """
 
 import time

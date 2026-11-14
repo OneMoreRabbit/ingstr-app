@@ -86,9 +86,11 @@ def test_nothing_declared_means_utf8_only(tmp_path):
 
 
 def test_an_uneven_table_is_read_as_plain_text(tmp_path):
-    """14 of ARC's failed with "Expected 2 fields in line 2, saw 8" — almost
-    certainly several tables stacked in one file. Skipping the bad lines would
-    drop content silently; the words are what a search index wants."""
+    """14 of ARC's failed because their rows did not agree on how many fields
+    they have — 7 with "Expected 2 fields in line 2, saw 8", the other 7 with
+    one field too many on a single line. Almost certainly several tables
+    stacked in one file. Skipping the bad lines would drop content silently;
+    the words are what a search index wants."""
     f = tmp_path / "ragged.csv"
     f.write_text("a,b\n1,2,3,4,5,6,7,8\n")
     elements = parse_file(f)
@@ -96,3 +98,44 @@ def test_an_uneven_table_is_read_as_plain_text(tmp_path):
     assert "a,b" in text
     # Nothing dropped: the long row is there too.
     assert "8" in text
+
+
+def test_a_parser_error_on_another_file_type_is_not_read_as_text(tmp_path):
+    """`ParserError` comes from more than one backend. A PDF or a spreadsheet
+    that raises one is not a file whose text we should quietly fall back to
+    reading — the fallback is for delimited files, whose text IS the point."""
+    from unittest.mock import patch
+
+    f = tmp_path / "doc.pdf"
+    f.write_text("not really a pdf")
+
+    class ParserError(Exception):
+        pass
+
+    with patch("ingstr.parse.partition", side_effect=ParserError("boom")) as part:
+        with pytest.raises(IngstrError, match="failed to parse"):
+            parse_file(f)
+    # Called once: the plain-text retry never happened.
+    assert part.call_count == 1
+
+
+def test_a_parser_error_on_a_csv_is_read_as_text(tmp_path):
+    from unittest.mock import patch
+
+    f = tmp_path / "data.csv"
+    f.write_text("a,b\n1,2,3\n")
+
+    class ParserError(Exception):
+        pass
+
+    calls = []
+
+    def fake(**kwargs):
+        calls.append(kwargs)
+        if len(calls) == 1:
+            raise ParserError("Expected 2 fields in line 2, saw 3")
+        return ["text element"]
+
+    with patch("ingstr.parse.partition", side_effect=fake):
+        assert parse_file(f) == ["text element"]
+    assert calls[1]["content_type"] == "text/plain"

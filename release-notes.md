@@ -40,9 +40,10 @@ which **change what gets indexed**.
 
 **Why it moved into ingstr.** On otter the two units carried `Conflicts=`,
 which *stops* the other unit rather than refusing the new one — so the
-nightly full run died one second after starting for **81 consecutive runs**,
-no orphan was ever removed, and nothing inside ingstr could see it because
-ingstr was never started. What the lock protects is ingstr's own state, so
+one nightly full run due since the restore was stopped a second after it
+started — and it would have been every night. No orphan has been removed
+since, and nothing inside ingstr could see it because ingstr was never
+started. What the lock protects is ingstr's own state, so
 the guarantee belongs with the program.
 
 **New exit code 5** — "a full run could not get the org's run lock". Not 75
@@ -60,11 +61,14 @@ means the thorough run did not happen.
   order. **Not detected:** a guessed encoding produces confident mojibake,
   which is then embedded and searchable and wrong, and nothing downstream can
   tell. Nothing declared means UTF-8 only, as before.
-- **Plain text, when a table will not parse.** 14 of ARC's failed with
-  `Expected 2 fields in line 2, saw 8` — almost certainly several tables
-  stacked in one file. The bad lines are **not** skipped, which would drop
-  content silently; the whole file is read as text instead. The structure is
-  lost, the content is not, and for a search index that is the right answer.
+- **Plain text, when a delimited file's rows disagree.** 14 of ARC's failed
+  because their rows did not agree on how many fields they have — 7 with
+  `Expected 2 fields in line 2, saw 8`, the other 7 with one field too many on
+  a single line — almost certainly several tables stacked in one file. The bad
+  lines are **not** skipped, which would drop content silently; the whole file
+  is read as text instead. The structure is lost, the content is not, and for
+  a search index that is the right answer. **Only `.csv` and `.tsv`:** the
+  error that triggers it comes from more than one backend.
 
 **Both change what is indexed.** A file that produced nothing before may now
 produce passages, and a table read as text loses its shape.

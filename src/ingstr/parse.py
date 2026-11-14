@@ -6,6 +6,14 @@ from unstructured.partition.auto import partition
 from .exceptions import IngstrError
 
 
+#: The file types whose rows can disagree about how many fields they have, and
+#: so the only ones a table-parse failure may send to the plain-text fallback.
+#: Named rather than inferred from the exception: `ParserError` is raised by
+#: more than one backend, and a PDF or a spreadsheet that fails to parse is
+#: not a file whose text we should fall back to reading.
+_DELIMITED_SUFFIXES = frozenset({".csv", ".tsv"})
+
+
 def parse_file(path: Path, *, fallback_encodings: list[str] | None = None) -> list[Any]:
     """Parse a file into unstructured elements via auto-dispatch.
 
@@ -29,19 +37,25 @@ def parse_file(path: Path, *, fallback_encodings: list[str] | None = None) -> li
        is then embedded and searchable and wrong, and nothing downstream can
        tell. An encoding that was declared is at least someone's decision.
 
-    2. **Plain text, when a table will not parse.** 14 of ARC's CSV files
-       failed with "Expected 2 fields in line 2, saw 8" — almost certainly
-       several tables stacked in one file. Skipping the bad lines would drop
-       content silently; reading the whole file as text keeps every word,
-       which for a search index is the right answer anyway. The structure is
-       lost; the content is not.
+    2. **Plain text, when a DELIMITED file's rows disagree.** 14 of ARC's CSV
+       files failed because their rows did not agree on how many fields they
+       have — 7 with "Expected 2 fields in line 2, saw 8", the other 7 with
+       one field too many on a single line — almost certainly several tables
+       stacked in one file. Skipping the bad lines would drop content
+       silently; reading the whole file as text keeps every word, which for a
+       search index is the right answer anyway. The structure is lost; the
+       content is not.
+
+       **Only for `.csv` and `.tsv`.** `ParserError` comes from more than one
+       backend, and a PDF or a spreadsheet that raises it is not a file whose
+       text we should quietly fall back to reading.
     """
     try:
         return list(partition(filename=str(path)))
     except UnicodeDecodeError as e:
         return _retry_with_encodings(path, fallback_encodings or [], original=e)
     except Exception as e:
-        if _looks_like_a_table_that_will_not_parse(e):
+        if _is_a_delimited_file_whose_rows_disagree(path, e):
             return _retry_as_plain_text(path, original=e)
         raise IngstrError(f"failed to parse {path}: {e}") from e
 
@@ -61,15 +75,20 @@ def _retry_with_encodings(
     ) from original
 
 
-def _looks_like_a_table_that_will_not_parse(error: Exception) -> bool:
-    """A delimited file whose rows do not agree on how many fields they have.
+def _is_a_delimited_file_whose_rows_disagree(path: Path, error: Exception) -> bool:
+    """A `.csv` or `.tsv` whose rows do not agree on how many fields they have.
 
-    Matched on the exception's type NAME rather than by importing pandas:
-    the parser that raises it is unstructured's business, not ingstr's, and
-    importing a backend to catch its exception makes this module care which
-    backend is in use.
+    BOTH halves are required. The exception is matched on its type NAME rather
+    than by importing pandas — the parser that raises it is unstructured's
+    business, not ingstr's — but `ParserError` is raised by more than one
+    backend, so the name alone would send any file type that happened to
+    produce one off to be read as plain text. The suffix is what says this is
+    a file whose text is the point.
     """
-    return type(error).__name__ == "ParserError"
+    return (
+        path.suffix.lower() in _DELIMITED_SUFFIXES
+        and type(error).__name__ == "ParserError"
+    )
 
 
 def _retry_as_plain_text(path: Path, *, original: Exception) -> list[Any]:

@@ -6,9 +6,10 @@ step and delete points the other has just written.
 
 Until v0.2.3 the estate was left to prevent it, and the cost of that showed:
 on otter the two units carried `Conflicts=`, which STOPS the other unit rather
-than refusing the new one, so the nightly full run died one second after
-starting for **81 consecutive runs** and no orphan was ever removed. Nothing
-inside ingstr could see it, because ingstr was never started.
+than refusing the new one, so the one nightly full run due since the
+restore was stopped a second after it started — and it would have been every
+night. No orphan has been removed since, and nothing inside ingstr could see
+it, because ingstr was never started.
 
 So the guarantee moves to where the state is. The lock is an `flock` on a file
 beside the state database, held for the whole run and released by the kernel

@@ -131,7 +131,8 @@ def ingest(
         if full:
             # The thorough run did not happen. Nothing else is wrong, and
             # that is exactly why it needs its own code: no other exit value
-            # would be true, and silence is what cost 81 nightly runs.
+            # would be true, and silence is what let the one nightly run
+            # due since the restore be stopped without anyone seeing it.
             log.error("full_run_gave_way", error=str(e))
             typer.echo(f"full run did not start: {e}", err=True)
             raise typer.Exit(code=_EXIT_LOCK_HELD) from e
