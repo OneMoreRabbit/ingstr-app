@@ -26,6 +26,14 @@ class SourceConfig(BaseModel):
     #: A wrong value does not fail: it matches no grant, or the wrong one. So
     #: a run that needs it and has not been given it stops.
     plan_path: str | None = None
+    #: Encodings to try, in order, after UTF-8 fails on a text-ish file.
+    #: Empty means UTF-8 only, which is what every version before v0.2.3 did.
+    #:
+    #: Declared rather than detected on purpose: a guessed encoding produces
+    #: confident mojibake, which is embedded and searchable and wrong, and
+    #: nothing downstream can tell. A declared one is at least somebody's
+    #: decision about their own files.
+    fallback_encodings: list[str] = Field(default_factory=list)
     follow_symlinks: bool = False
     exclude_patterns: list[str] = Field(default_factory=list)
 

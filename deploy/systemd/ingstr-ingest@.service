@@ -27,6 +27,23 @@ WorkingDirectory=/home/otter/docker/ingstr/%i
 # No -f: compose reads compose.yml from WorkingDirectory, which is what keeps
 # the project name per-org. -T because there is no terminal under systemd.
 #
+# This is the ORDINARY run. It takes no --full and no --wait-for-lock: if a
+# full run is in progress it gives way at once and exits 0, which is correct
+# — another run is already doing the work.
+#
+# The NIGHTLY unit is the other one, and it must pass BOTH --full and
+# --wait-for-lock <seconds>. Without the wait it does not wait at all and
+# fails with exit 5. How long is worth waiting is a property of the schedule,
+# which is why it is declared here rather than built into ingstr.
+#
+# DO NOT USE Conflicts= BETWEEN THE TWO UNITS. Conflicts= STOPS the other
+# unit rather than refusing the new one, so the unit that starts second kills
+# the one already running. On otter the one nightly full run due since the
+# restore was stopped a second after it started, and it would have been every
+# night after it, with nothing saying so. From v0.2.3 ingstr refuses for
+# itself, but a unit-level lock is still worth having so no pointless
+# container is started.
+#
 # AND NO --expect-removals, EVER, IN A UNIT. That flag lets a run remove more
 # passages than the guard would allow, and it exists to be typed by hand, for
 # one run, by someone who has looked at a --dry-run first. In a unit it would

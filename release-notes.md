@@ -12,6 +12,71 @@ Newest first. One entry per release tag, written in the same commit that cuts th
 tag. Plain English: a reader skimming this page should know what changed and
 whether they have to act.
 
+## v0.2.3 — 2026-11-14
+
+**TL;DR:** ingstr now enforces one run per org at a time itself, instead of
+leaving it to every deployment to get right. And two CSV fallbacks, both of
+which **change what gets indexed**.
+
+### One run per org, enforced here
+
+- **A lock beside the state database**, held for the whole run and released
+  by the system when the process ends — nothing to clear after a crash.
+- **An ordinary run that finds it held gives way and SUCCEEDS**, with one log
+  line. Another run is doing the work; nothing is wrong, and a five-minute
+  timer reporting failure whenever a long run is in progress would be a check
+  that fires when nothing is wrong.
+- **A full run WAITS**, for as long as `--wait-for-lock <seconds>` allows,
+  and **fails with the new exit code 5** if it never gets in. A full run that
+  gives way silently is the fault this exists to prevent.
+- **Omit `--wait-for-lock` and a full run does not wait**: it fails at once,
+  loudly, rather than waiting for a length nobody chose.
+- `--dry-run`, `stats` and `health` take no lock. A dry run writes nothing,
+  so it cannot race anything.
+- **ingstr's lock and the estate's do not meet**, by design: the estate's is
+  a file on the host beside `compose.yml`, ingstr's is beside the state
+  database inside the container. The wrapper stops a container being started
+  for nothing; ingstr refuses if one is started anyway.
+
+**Why it moved into ingstr.** On otter the two units carried `Conflicts=`,
+which *stops* the other unit rather than refusing the new one — so the
+one nightly full run due since the restore was stopped a second after it
+started — and it would have been every night. No orphan has been removed
+since, and nothing inside ingstr could see it because ingstr was never
+started. What the lock protects is ingstr's own state, so
+the guarantee belongs with the program.
+
+**New exit code 5** — "a full run could not get the org's run lock". Not 75
+or 76: the estate's own lock wrapper uses those for the same two situations
+one layer up, and ingstr will not reuse them. None of
+the existing codes is true for it: nothing is misconfigured, no upstream is
+down, no file failed, nothing crashed. **The estate must alert on 5**: it
+means the thorough run did not happen.
+
+### Two CSV fallbacks
+
+- **A declared encoding, after UTF-8.** 20 of ARC's CSV files failed with
+  `'utf-8' codec can't decode byte 0xba` — an ordinary character in cp1252.
+  The encodings are declared in `source.fallback_encodings` and tried in
+  order. **Not detected:** a guessed encoding produces confident mojibake,
+  which is then embedded and searchable and wrong, and nothing downstream can
+  tell. Nothing declared means UTF-8 only, as before.
+- **Plain text, when a delimited file's rows disagree.** 14 of ARC's failed
+  because their rows did not agree on how many fields they have — 7 with
+  `Expected 2 fields in line 2, saw 8`, the other 7 with one field too many on
+  a single line — almost certainly several tables stacked in one file. The bad
+  lines are **not** skipped, which would drop content silently; the whole file
+  is read as text instead. The structure is lost, the content is not, and for
+  a search index that is the right answer. **Only `.csv` and `.tsv`:** the
+  error that triggers it comes from more than one backend.
+
+**Both change what is indexed.** A file that produced nothing before may now
+produce passages, and a table read as text loses its shape.
+
+**Action:** add `--wait-for-lock` to the nightly unit, and alert on exit 5.
+Declare `source.fallback_encodings` for any org whose files are not all
+UTF-8.
+
 ## v0.2.2 — 2026-11-13
 
 **TL;DR:** folders shared by an added ACL rather than by classification are

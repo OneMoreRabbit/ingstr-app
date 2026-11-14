@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "ingstr"
-version = "0.2.2"
+version = "0.2.3"
 description = "Document ingestion pipeline that walks a filesystem tree, parses + chunks documents, embeds via Ollama, and upserts into Qdrant with RBAC classification metadata."
 readme = "README.md"
 requires-python = ">=3.11"
