@@ -5,7 +5,6 @@ from unstructured.partition.auto import partition
 
 from .exceptions import IngstrError
 
-
 #: The file types whose rows can disagree about how many fields they have, and
 #: so the only ones a table-parse failure may send to the plain-text fallback.
 #: Named rather than inferred from the exception: `ParserError` is raised by
