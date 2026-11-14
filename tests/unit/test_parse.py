@@ -112,9 +112,11 @@ def test_a_parser_error_on_another_file_type_is_not_read_as_text(tmp_path):
     class ParserError(Exception):
         pass
 
-    with patch("ingstr.parse.partition", side_effect=ParserError("boom")) as part:
-        with pytest.raises(IngstrError, match="failed to parse"):
-            parse_file(f)
+    with (
+        patch("ingstr.parse.partition", side_effect=ParserError("boom")) as part,
+        pytest.raises(IngstrError, match="failed to parse"),
+    ):
+        parse_file(f)
     # Called once: the plain-text retry never happened.
     assert part.call_count == 1
 
