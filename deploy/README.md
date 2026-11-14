@@ -185,6 +185,16 @@ volume. A unit pointing at the parent directly cannot run a second org.
 Change `User=` and `WorkingDirectory=` if yours sits elsewhere — nothing in ingstr
 depends on the parent directory.
 
+**Two runs for one org must never overlap.** From v0.2.3 ingstr enforces that
+itself with a lock beside the state database: an ordinary run gives way and
+exits 0, a full run waits for `--wait-for-lock <seconds>` and exits **5** if
+it never gets in. Alert on 5 — it means the nightly run did not happen.
+
+**Do not use `Conflicts=` between the units.** It *stops* the other unit
+rather than refusing the new one, so whichever starts second kills the one
+already running. On otter that killed the nightly full run one second after
+it started, every night, for 81 consecutive runs.
+
 **What otter actually runs today is two timers per org**, not the `.path` unit:
 `ingstr-ingest-<org>.timer` every five minutes and `ingstr-ingest-full-<org>.timer`
 nightly at 03:00. The `.path` unit below is the sentinel-driven shape ADR-0010 §6

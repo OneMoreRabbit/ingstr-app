@@ -1,5 +1,6 @@
 import os
 import sys
+from contextlib import nullcontext
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Annotated
@@ -11,6 +12,7 @@ from . import __version__
 from .config import DEFAULT_CONFIG_PATH, IngstrConfig, OrgView, load_config
 from .embed import EmbeddingClient
 from .exceptions import ConfigError, PlanError, UpstreamUnavailable
+from .locking import RunLockHeld, run_lock
 from .logging_setup import configure_logging
 from .pipeline import RunSummary, run_ingest
 from .plan import ResolvedPlan, load_plan
@@ -52,6 +54,12 @@ _EXIT_CONFIG = 1
 _EXIT_UPSTREAM = 2
 _EXIT_PARTIAL = 3
 _EXIT_FATAL = 4
+#: A FULL run that waited for the org's run lock and never got it (v0.2.3).
+#: Its own code because none of the others is true: nothing is misconfigured,
+#: no upstream is down, no file failed, nothing crashed — the thorough run
+#: simply did not happen, and that is the one thing the estate must hear
+#: about. An ordinary run that finds the lock held exits 0 instead.
+_EXIT_LOCK_HELD = 5
 
 
 @app.command()
@@ -60,6 +68,19 @@ def ingest(
     org: OrgOption = None,
     full: Annotated[bool, typer.Option("--full", help="Force a complete re-walk.")] = False,
     dry_run: Annotated[bool, typer.Option("--dry-run", help="Plan but do not write.")] = False,
+    wait_for_lock: Annotated[
+        int | None,
+        typer.Option(
+            "--wait-for-lock",
+            help=(
+                "Seconds a --full run may wait for the org's run lock. "
+                "Omitted, a full run does not wait and fails at once with "
+                "exit 5. An ordinary run never waits and gives way quietly. "
+                "Declared by whoever schedules the run, because only the "
+                "schedule knows how long waiting is worth."
+            ),
+        ),
+    ] = None,
     expect_removals: Annotated[
         int | None,
         typer.Option(
@@ -86,6 +107,35 @@ def ingest(
 
     mode = "full" if full else "incremental"
     started_at = _utc_now_iso()
+
+    # One run per org at a time (v0.2.3). A dry run takes no lock: it writes
+    # nothing, so it cannot race anything.
+    lock = (
+        nullcontext()
+        if dry_run
+        else run_lock(
+            cfg.state.db_path,
+            # Only a FULL run waits, and only for as long as it was told. An
+            # ordinary run gives way at once; a full run that gave way
+            # silently is the fault this exists to prevent.
+            wait_seconds=float(wait_for_lock or 0) if full else 0.0,
+        )
+    )
+    try:
+        lock.__enter__()
+    except RunLockHeld as e:
+        if full:
+            # The thorough run did not happen. Nothing else is wrong, and
+            # that is exactly why it needs its own code: no other exit value
+            # would be true, and silence is what cost 81 nightly runs.
+            log.error("full_run_gave_way", error=str(e))
+            typer.echo(f"full run did not start: {e}", err=True)
+            raise typer.Exit(code=_EXIT_LOCK_HELD) from e
+        # An ordinary run: another run is already doing the work. Nothing is
+        # wrong, so nothing is reported as wrong.
+        log.info("run_gave_way_to_another", error=str(e))
+        typer.echo(f"another run is in progress; this one gave way: {e}")
+        raise typer.Exit(code=_EXIT_OK) from e
 
     state = StateDB(cfg.state.db_path)
     run_id: int | None = None
@@ -179,6 +229,9 @@ def ingest(
             )
     finally:
         state.close()
+        # The kernel releases the lock when the process ends either way; this
+        # is for the tests and for anything that ever calls this in-process.
+        lock.__exit__(None, None, None)
 
     if exit_code != _EXIT_OK:
         raise typer.Exit(code=exit_code)

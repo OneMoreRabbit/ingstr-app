@@ -532,7 +532,9 @@ def _process_file(
     #    while everything else (an unreadable moment, a group that is not in
     #    the plan yet) can.
     try:
-        elements = parse_file(path)  # IngstrError on failure
+        elements = parse_file(
+            path, fallback_encodings=cfg.source.fallback_encodings
+        )  # IngstrError on failure
         chunks = chunk_elements(elements, cfg.chunking)
         if not chunks:
             raise IngstrError(f"{path}: parsed but produced 0 chunks")

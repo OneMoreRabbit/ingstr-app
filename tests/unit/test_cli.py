@@ -328,3 +328,78 @@ def test_health_does_not_fail_an_org_with_no_grant_of_its_own(tmp_path: Path) ->
     # unreachable in a test, not from the grant check.
     assert "plan.grants" in output
     assert "FAIL  plan.grants" not in output
+
+
+# ── v0.2.3: one run per org at a time ──────────────────────────────────────
+
+
+def test_an_ordinary_run_gives_way_and_succeeds(tmp_path: Path, monkeypatch) -> None:
+    """Another run is already doing the work, so nothing is wrong — and a
+    five-minute timer that reported failure whenever a long run was in
+    progress would be a check that fires when nothing is wrong."""
+    from ingstr.locking import run_lock
+
+    monkeypatch.setenv("QDRANT_RW_API_KEY", "k")
+    cfg = _cfg_file(tmp_path)
+    with run_lock(tmp_path / "state.db"):
+        result = runner.invoke(app, ["ingest", "--config", str(cfg)])
+    assert result.exit_code == 0
+    assert "gave way" in result.stdout
+
+
+def test_a_full_run_that_cannot_get_in_fails_with_its_own_code(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """A full run that gives way silently is otter: the thorough run simply
+    never happens and nothing says so. Exit 5 is its own code because none of
+    the others is true — nothing is misconfigured, no upstream is down, no
+    file failed, nothing crashed."""
+    from ingstr.locking import run_lock
+
+    monkeypatch.setenv("QDRANT_RW_API_KEY", "k")
+    cfg = _cfg_file(tmp_path)
+    with run_lock(tmp_path / "state.db"):
+        result = runner.invoke(app, ["ingest", "--config", str(cfg), "--full"])
+    assert result.exit_code == 5
+    assert "full run did not start" in str(result.stderr or "") + result.stdout
+
+
+def test_a_full_run_not_told_it_may_wait_does_not_wait(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Absent, the limit is not guessed: the run fails loudly rather than
+    waiting for a length nobody chose."""
+    import time
+
+    from ingstr.locking import run_lock
+
+    monkeypatch.setenv("QDRANT_RW_API_KEY", "k")
+    cfg = _cfg_file(tmp_path)
+    with run_lock(tmp_path / "state.db"):
+        started = time.monotonic()
+        result = runner.invoke(app, ["ingest", "--config", str(cfg), "--full"])
+        assert time.monotonic() - started < 2.0
+    assert result.exit_code == 5
+
+
+def test_a_dry_run_takes_no_lock(tmp_path: Path) -> None:
+    """It writes nothing, so it cannot race anything."""
+    from ingstr.locking import run_lock
+
+    cfg = _cfg_file(tmp_path)
+    with run_lock(tmp_path / "state.db"):
+        result = runner.invoke(app, ["ingest", "--config", str(cfg), "--dry-run"])
+    # It reaches Qdrant and fails there, not at the lock.
+    assert result.exit_code != 5
+    assert "gave way" not in result.stdout
+
+
+def test_stats_and_health_take_no_lock(tmp_path: Path) -> None:
+    from ingstr.locking import run_lock
+
+    cfg = _cfg_file(tmp_path)
+    with run_lock(tmp_path / "state.db"):
+        stats = runner.invoke(app, ["stats", "--config", str(cfg)])
+        health = runner.invoke(app, ["health", "--config", str(cfg)])
+    assert stats.exit_code == 0
+    assert health.exit_code != 5
