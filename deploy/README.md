@@ -123,11 +123,11 @@ The shared registry is host-mounted on otter once at `/mnt/registry/` and bind-m
 > this by hand, read the response body — the status code alone is what made an
 > earlier version of this page claim the package was unreachable.
 >
-> The old `ghcr.io/jobcpf/ingstr-app` holds only pre-release tags — `…-rc4` and
-> earlier, no `v0.1.0`. It answers on any header because those are docker v2
-> manifests, which is why it makes a misleading control. Namespace ruling
-> `agenteco-needs-ghcr-namespace`: published images go to
-> `ghcr.io/onemorerabbit/`, never a personal namespace.
+> Namespace ruling `agenteco-needs-ghcr-namespace`: a release has one home,
+> `ghcr.io/onemorerabbit/ingstr-app`, never a personal namespace. An old
+> personal-namespace package still answers on any header, because its tags are
+> docker v2 manifests — which makes it a misleading control for the check
+> above. It is in no play and no setting; do not use it for anything.
 >
 > **`latest` exists in the org package and must not be used.** It is the same
 > digest as `v0.1.0` today and carries no promise of staying so. The tag decides
