@@ -39,12 +39,14 @@ which **change what gets indexed**.
   for nothing; ingstr refuses if one is started anyway.
 
 **Why it moved into ingstr.** On otter the two units carried `Conflicts=`,
-which *stops* the other unit rather than refusing the new one — so the
-one nightly full run due since the restore was stopped a second after it
-started — and it would have been every night. No orphan has been removed
-since, and nothing inside ingstr could see it because ingstr was never
-started. What the lock protects is ingstr's own state, so
-the guarantee belongs with the program.
+which *stops* the other unit rather than refusing the new one — so whichever
+started second killed the one already running. On 2026-11-14 that was the
+nightly full run, stopped a second after it started, with nothing inside
+ingstr able to see it because ingstr was never started. On the nights after it
+the two did not collide and the full run finished; a fault that shows on some
+nights and not others is the worst kind to leave to a deployment. What the
+lock protects is ingstr's own state, so the guarantee belongs with the
+program.
 
 **New exit code 5** — "a full run could not get the org's run lock". Not 75
 or 76: the estate's own lock wrapper uses those for the same two situations

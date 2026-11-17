@@ -192,8 +192,10 @@ it never gets in. Alert on 5 — it means the nightly run did not happen.
 
 **Do not use `Conflicts=` between the units.** It *stops* the other unit
 rather than refusing the new one, so whichever starts second kills the one
-already running. On otter that stopped the one nightly full run due since the restore, a
-second after it started — and it would have stopped every one after it.
+already running. On otter, on 2026-11-14, that was the nightly full run,
+stopped a second after it started. On the nights after it the two did not
+collide and the full run finished — which is why this is worth a lock rather
+than a watch: nothing says which kind of night it was.
 
 **What otter actually runs today is two timers per org**, not the `.path` unit:
 `ingstr-ingest-<org>.timer` every five minutes and `ingstr-ingest-full-<org>.timer`
