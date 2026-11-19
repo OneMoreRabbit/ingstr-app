@@ -9,10 +9,18 @@ import pathspec
 import structlog
 
 from . import __version__
-from .availability import DEFAULT_PURGE_THRESHOLD, PurgeVerdict, assess_purge
+from .agent_folders import (
+    AgentFolderSummary,
+    conversation_fault,
+    is_conversation,
+    read_agent_folders,
+    turn_text_is_indexable,
+)
+from .availability import PurgeVerdict, assess_purge
 from .chunk import Chunk, chunk_elements
 from .classify import classify
 from .config import OrgView
+from .conversations import Turn, read_conversation
 from .embed import EmbeddingClient
 from .exceptions import (
     AmbiguousGrant,
@@ -25,7 +33,7 @@ from .exceptions import (
 )
 from .hashing import sha256_file
 from .parse import parse_file
-from .plan import ResolvedPlan
+from .plan import AgentFolder, ResolvedPlan
 from .qdrant_io import QdrantPoint, QdrantWriter
 from .state import FileRecord, StateDB
 
@@ -92,6 +100,10 @@ class RunSummary:
     #: exists, and a silent zero exit would let a broken mount look like a
     #: quiet day.
     purge_refused_reason: str | None = None
+    #: What the agent-folder pass did, when this org has one. None means the
+    #: org declared no agent source at all, which is not the same as a pass
+    #: that read nothing.
+    agent_folders: AgentFolderSummary | None = None
 
 
 @dataclass(frozen=True)
@@ -229,6 +241,24 @@ def run_ingest(
             summary.files_indexed += 1
             summary.chunks_written += outcome.chunks
 
+    # The agents' own folders, when this org has them. Inside this function
+    # rather than beside it, for one reason that matters: their files go into
+    # the same state database, so a removal step that had not seen them would
+    # read every one of them as an orphan and delete its passages on the first
+    # full run.
+    if cfg.agent_source is not None:
+        summary.agent_folders = run_agent_folders(
+            cfg,
+            plan,
+            state=state,
+            embedder=embedder,
+            qdrant=qdrant,
+            full=full,
+            dry_run=dry_run,
+            summary=summary,
+        )
+        seen |= summary.agent_folders.seen
+
     # The removal step. TAKING ACCESS AWAY MUST TAKE IT AWAY IN SEARCH, so
     # files that can no longer be classified are removed in EVERY run, not
     # only in --full. Orphans — files gone from disk — are a full-run concern
@@ -236,6 +266,15 @@ def run_ingest(
     known = state.all_paths()
     orphans = sorted(known - seen) if full else []
     lost = sorted(lost_access)
+
+    # The one removal an agent folder has: the plan no longer declaring it.
+    # Deliberately tested against the DECLARATION and not against what was
+    # readable — a folder whose host is down is still declared, and a mount
+    # that is missing must never empty an index (ADR-0010 §6).
+    if not dry_run and cfg.agent_source is not None:
+        _remove_undeclared_conversations(
+            cfg, plan, state=state, qdrant=qdrant, summary=summary
+        )
 
     # A full run ALWAYS reaches the step, including when it finds nothing to
     # remove — that is what lets a clean run clear an earlier refusal. Setting
@@ -258,11 +297,9 @@ def run_ingest(
         # Files that lost access count against the same threshold, because a
         # plan read from a half-written file could re-classify everything at
         # once, and that is the same accident wearing different clothes.
-        threshold = (
-            cfg.agent_source.purge_threshold
-            if cfg.agent_source is not None
-            else DEFAULT_PURGE_THRESHOLD
-        )
+        # Declared on the org since ingstr-deploy 0.8: it governs everything
+        # this org indexes, and it lived in `agent_source` while doing so.
+        threshold = cfg.purge_threshold
         verdict = assess_purge(
             known_count=len(known),
             vanished_count=len(orphans) + len(lost),
@@ -398,10 +435,21 @@ def _process_file(
     qdrant: QdrantWriter,
     full: bool,
     dry_run: bool,
+    rel_root: Path | None = None,
+    group_override: str | None = None,
 ) -> _ProcessOutcome:
-    """Per-file pipeline, brief §8 steps 1–9."""
+    """Per-file pipeline, brief §8 steps 1–9.
+
+    `rel_root` and `group_override` are how an agent folder uses this: its
+    files live under the agent-hosts mount rather than the org's root, and
+    their group is DECLARED by the plan rather than read from the file. A
+    seat's conversations and notes belong to its home user, so their own group
+    says nothing about who may read them (`agent-folders-design-v0_1` §5).
+    Everything after classification is identical, which is the point — one
+    pipeline, two sources.
+    """
     abs_path = str(path.resolve())
-    rel_path = path.relative_to(cfg.source.root).as_posix()
+    rel_path = path.relative_to(rel_root or cfg.source.root).as_posix()
 
     existing = state.get_file(abs_path)
     stat_info = path.stat()
@@ -414,7 +462,7 @@ def _process_file(
     #    nothing in the file at all. Classifying first is what lets the estate
     #    give a folder a group, or add a grant, and have the next ordinary run
     #    pick the files up instead of waiting for 03:00.
-    group = classify(
+    group = group_override or classify(
         path,
         plan,
         cfg.org,
@@ -768,3 +816,347 @@ def _record_parse_failure(
 
 def _utc_now_iso() -> str:
     return datetime.now(UTC).isoformat()
+
+
+def run_agent_folders(
+    cfg: OrgView,
+    plan: ResolvedPlan,
+    *,
+    state: StateDB,
+    embedder: EmbeddingClient,
+    qdrant: QdrantWriter,
+    full: bool,
+    dry_run: bool,
+    summary: RunSummary,
+) -> AgentFolderSummary:
+    """Index the agents' folders this org declares (`ingstr-deploy` 0.8).
+
+    Called after the org's own walk and sharing its summary, because the two
+    write to one collection and one state database: a run reports what it did,
+    not what each half of it did.
+
+    Nothing here removes anything. A conversation that is gone or shorter than
+    we have read is a FAULT — recorded, counted, and left alone — because
+    conversations are kept for ever, so absence is the export, the host or the
+    retention setting, never a deletion to follow (`agent-folders-design-v0_1`
+    D4).
+    """
+    folders, folder_summary = read_agent_folders(cfg, plan, dry_run=dry_run)
+    if cfg.agent_source is None:
+        return folder_summary
+
+    now_iso = _utc_now_iso()
+    for folder in folders:
+        directory = cfg.agent_source.root / folder.path
+        seen_here: set[str] = set()
+        for path in iter_source_files(
+            directory, cfg.source.follow_symlinks, cfg.source.exclude_patterns
+        ):
+            abs_path = str(path.resolve())
+            seen_here.add(abs_path)
+            folder_summary.seen.add(abs_path)
+            summary.files_seen += 1
+            if is_conversation(path):
+                _index_conversation(
+                    path,
+                    folder=folder,
+                    cfg=cfg,
+                    state=state,
+                    embedder=embedder,
+                    qdrant=qdrant,
+                    full=full,
+                    dry_run=dry_run,
+                    now_iso=now_iso,
+                    folder_summary=folder_summary,
+                    summary=summary,
+                )
+                continue
+            # A memory note or a file in `scratch` is an ordinary document;
+            # only its group comes from somewhere else.
+            try:
+                outcome = _process_file(
+                    path,
+                    cfg=cfg,
+                    plan=plan,
+                    state=state,
+                    embedder=embedder,
+                    qdrant=qdrant,
+                    full=full,
+                    dry_run=dry_run,
+                    rel_root=cfg.agent_source.root,
+                    group_override=folder.group,
+                )
+            except UpstreamUnavailable:
+                raise
+            except OSError as e:
+                _log.warning("agent_file_unreadable", agent=folder.name, error=str(e))
+                folder_summary.documents_errored += 1
+                summary.files_errored += 1
+                continue
+            except IngstrError as e:
+                _log.warning("agent_file_failed", agent=folder.name, error=str(e))
+                folder_summary.documents_errored += 1
+                summary.files_errored += 1
+                continue
+            if outcome.action in ("ingest", "dry_run", "payload_refresh"):
+                folder_summary.documents_indexed += 1
+                summary.files_indexed += 1
+                summary.chunks_written += outcome.chunks
+                folder_summary.chunks_written += outcome.chunks
+            else:
+                summary.files_skipped += 1
+
+        _note_vanished_conversations(
+            directory,
+            seen_here=seen_here,
+            state=state,
+            dry_run=dry_run,
+            now_iso=now_iso,
+            folder_summary=folder_summary,
+        )
+    return folder_summary
+
+
+def _index_conversation(
+    path: Path,
+    *,
+    folder: AgentFolder,
+    cfg: OrgView,
+    state: StateDB,
+    embedder: EmbeddingClient,
+    qdrant: QdrantWriter,
+    full: bool,
+    dry_run: bool,
+    now_iso: str,
+    folder_summary: AgentFolderSummary,
+    summary: RunSummary,
+) -> None:
+    """Read one conversation from where the last run stopped, and index the
+    turns after it."""
+    abs_path = str(path.resolve())
+    known = state.read_position(abs_path)
+
+    kind = conversation_fault(path, known)
+    if kind == "shrunk":
+        # The passages stay. See the module docstring: this is never a
+        # deletion, so re-reading from the top would double-write the turns
+        # that remain and leave the vanished ones indexed anyway.
+        folder_summary.conversations_shrunk += 1
+        if not dry_run:
+            state.record_conversation_fault(
+                abs_path,
+                kind="shrunk",
+                known_line=known.last_line if known else 0,
+                at=now_iso,
+            )
+        _log.error("conversation_shrunk", agent=folder.name, folder=folder.folder)
+        return
+
+    # `--full` re-reads a conversation from the top. The ids are derived from
+    # the conversation and turn, so re-reading rewrites exactly what it wrote
+    # before: the thorough run stays thorough without duplicating anything.
+    from_line = 0 if full else (known.last_line if known else 0)
+    try:
+        read = read_conversation(path, from_line=from_line)
+    except OSError as e:
+        _log.warning("conversation_unreadable", agent=folder.name, error=str(e))
+        folder_summary.documents_errored += 1
+        summary.files_errored += 1
+        return
+
+    folder_summary.conversations_read += 1
+
+    # The declaration decides who may read these passages, so a changed
+    # declaration has to move the ones already written. Nothing else would:
+    # the turns are not re-read, so nothing would rewrite their payload, and
+    # the old audience would keep the conversation for good.
+    if known is not None and known.classification_group != folder.group and not dry_run:
+        qdrant.set_classification_group(abs_path, folder.group, indexed_at=now_iso)
+        _log.info(
+            "conversation_group_changed",
+            agent=folder.name,
+            old_group=known.classification_group,
+            new_group=folder.group,
+        )
+    folder_summary.lines_unrecognised += read.unrecognised
+    if read.unrecognised:
+        # §9: a count nobody reports is a silence. A runtime that changes its
+        # line shape would otherwise stop being indexed with every run still
+        # reporting success.
+        _log.warning(
+            "conversation_lines_unrecognised",
+            agent=folder.name,
+            runtime_hint=folder.folder,
+            count=read.unrecognised,
+        )
+
+    indexable = [
+        turn for turn in read.turns
+        if turn_text_is_indexable(turn.text, folder_summary)
+    ]
+    if not indexable:
+        if not dry_run:
+            state.record_read_position(
+                abs_path,
+                last_line=read.last_line,
+                size_bytes=path.stat().st_size,
+                turn_count=0,
+                classification_group=folder.group,
+                at=now_iso,
+            )
+            state.clear_conversation_fault(abs_path)
+        return
+
+    vectors = embedder.embed([turn.text for turn in indexable])
+    points = [
+        _build_turn_point(
+            turn=turn,
+            vector=vector,
+            org=cfg.org,
+            agent=folder,
+            source_path=abs_path,
+            source_path_rel=path.relative_to(cfg.agent_source.root).as_posix()
+            if cfg.agent_source
+            else path.name,
+            indexed_at=now_iso,
+        )
+        for turn, vector in zip(indexable, vectors, strict=True)
+    ]
+
+    folder_summary.turns_indexed += len(points)
+    folder_summary.chunks_written += len(points)
+    summary.chunks_written += len(points)
+    summary.files_indexed += 1
+
+    if dry_run:
+        return
+
+    qdrant.upsert_points(points)
+    state.record_read_position(
+        abs_path,
+        last_line=read.last_line,
+        size_bytes=path.stat().st_size,
+        turn_count=len(points),
+        classification_group=folder.group,
+        at=now_iso,
+    )
+    state.clear_conversation_fault(abs_path)
+
+
+def _build_turn_point(
+    *,
+    turn: Turn,
+    vector: list[float],
+    org: str,
+    agent: AgentFolder,
+    source_path: str,
+    source_path_rel: str,
+    indexed_at: str,
+) -> QdrantPoint:
+    """One turn, one point.
+
+    The id is built from the conversation and the turn, not from a position in
+    a file: a conversation grows, and an id that moved when it grew would make
+    every append a rewrite of everything before it.
+    """
+    point_id = str(
+        uuid.uuid5(
+            _POINT_NAMESPACE,
+            f"{org}:conversation:{turn.conversation_id}:{turn.turn_id}",
+        )
+    )
+    return QdrantPoint(
+        id=point_id,
+        vector=vector,
+        payload={
+            "text": turn.text,
+            "source_path": source_path,
+            "source_path_rel": source_path_rel,
+            "classification_group": agent.group,
+            "indexed_at": indexed_at,
+            "file_type": "conversation",
+            "agent": agent.name,
+            "runtime": _runtime_of(source_path_rel),
+            "conversation_id": turn.conversation_id,
+            "turn_id": turn.turn_id,
+            "role": turn.role,
+            "turn_time": turn.turn_time,
+            "sidechain": turn.sidechain,
+            "chunk_index": 0,
+            "chunk_total": 1,
+        },
+    )
+
+
+def _runtime_of(source_path_rel: str) -> str:
+    """Which runtime wrote this conversation, from the folder it sits in.
+
+    The estate binds `sessions/claude/` and `sessions/codex/` per runtime
+    (`agent-folders-design-v0_1` §4), so the path states it. A tree that
+    follows neither says `unknown` rather than a guess.
+    """
+    parts = source_path_rel.split("/")
+    for known in ("claude", "codex"):
+        if known in parts:
+            return known
+    return "unknown"
+
+
+def _note_vanished_conversations(
+    directory: Path,
+    *,
+    seen_here: set[str],
+    state: StateDB,
+    dry_run: bool,
+    now_iso: str,
+    folder_summary: AgentFolderSummary,
+) -> None:
+    """Conversations we have read before and did not find this time.
+
+    Not a removal, in any run, including `--full`: conversations are kept for
+    ever, so a missing one is the export, the host or the retention setting.
+    The passages stay and the run keeps saying so until the file is back.
+    """
+    known = state.conversation_paths_under(str(directory))
+    for missing in sorted(known - seen_here):
+        folder_summary.conversations_gone += 1
+        _log.error("conversation_gone", folder=str(directory.name))
+        if not dry_run:
+            position = state.read_position(missing)
+            state.record_conversation_fault(
+                missing,
+                kind="gone",
+                known_line=position.last_line if position else 0,
+                at=now_iso,
+            )
+
+
+def _remove_undeclared_conversations(
+    cfg: OrgView,
+    plan: ResolvedPlan,
+    *,
+    state: StateDB,
+    qdrant: QdrantWriter,
+    summary: RunSummary,
+) -> None:
+    """Forget conversations whose folder the plan no longer declares.
+
+    This is access being withdrawn, which the index must follow in every run,
+    not only in `--full` — the same rule as a file that can no longer be
+    classified (v0.2.2). It is tested against the plan rather than against the
+    filesystem precisely so that a missing mount cannot cause it: an undeclared
+    folder is a decision somebody made, an unreachable one is not.
+    """
+    if cfg.agent_source is None:
+        return
+    declared = [
+        str((cfg.agent_source.root / folder.path).resolve())
+        for folder in plan.indexed_folders_for_org(cfg.org)
+    ]
+    for path in sorted(state.all_conversation_paths()):
+        if any(path.startswith(root) for root in declared):
+            continue
+        qdrant.delete_points_by_source_path(path)
+        state.forget_conversation(path)
+        summary.passages_removed_lost_access += 1
+        _log.info("conversation_removed_undeclared")

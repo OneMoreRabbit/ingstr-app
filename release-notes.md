@@ -1,7 +1,7 @@
 ---
 title: Release notes — ingstr-app
 status: active
-updated: 2026-11-12
+updated: 2026-11-19
 owner: agent-eco.component.ingstr
 about: one short entry per release, newest first — what changed and what anyone must do about it
 ---
@@ -11,6 +11,81 @@ about: one short entry per release, newest first — what changed and what anyon
 Newest first. One entry per release tag, written in the same commit that cuts the
 tag. Plain English: a reader skimming this page should know what changed and
 whether they have to act.
+
+## Unreleased — agent folders
+
+**The release number is the operator's to set**; this entry moves under it when
+the tag is cut. Nothing below is deployed.
+
+**TL;DR:** an org may now have a **second source** — the agents' and seats' own
+`sessions`, `memory` and `scratch`, read through beaver's mount and classified
+by the group the RBAC plan declares. Three things a deployment must do before
+it can be used, each of which stops the run with a message naming the fix.
+
+### What is indexed from a conversation
+
+Only the words: what the person and the agent said. Measured on a real Claude
+Code conversation (7,293 lines, 12 MB): tool calls and their output are 70% of
+the content, the agent's thinking 20%, and the words about 10%.
+
+- `user` and `assistant` lines, `text` blocks and plain-string user messages.
+- **Never** `tool_use` or `tool_result`, and never a `user` line carrying
+  `toolUseResult` — Claude Code records tool output as a user line, so without
+  that check two thirds of what looks like a person talking is machine output,
+  including the contents of files indexed elsewhere under their own group.
+- **Never `thinking`** (arch, 2026-11-19): drafting rather than what was said,
+  and the group would be reading an agent's private reasoning.
+- Sub-agent turns are indexed, flagged `sidechain` in the payload.
+- A block that is wholly a system reminder is dropped. A line that MIXES a
+  person's words with injected text keeps both: nothing in the format separates
+  them, and that limit is written down rather than implied.
+- Codex is the same rule against its own shape, including archived
+  conversations compressed as `.jsonl.zst`.
+
+**One passage per turn**, never spanning two, so a result is attributable to
+one speaker. New payload fields for dprox: `agent`, `runtime`,
+`conversation_id`, `turn_id`, `role`, `turn_time`, `sidechain`.
+
+### A live conversation is read from where the last run stopped
+
+A conversation is append-only and grows for as long as the work does. ingstr
+skips by whole-file hash, so without this one new turn would re-parse a 12 MB
+file and re-embed every passage in it — every five minutes, on every live
+conversation. The read position is kept per file and the passage id is built
+from the conversation and turn ids, so an append is a pure insert and a re-read
+writes exactly the ids it wrote before. The positions live in a new table, so
+an older image still opens the state database.
+
+### A vanished or shrunk conversation is a fault, not a removal
+
+Conversations are kept for ever, so a conversation that is gone — or shorter
+than ingstr has already read — means the export, the host or the retention
+setting. **The passages stay**, the run exits 3, and it keeps saying so until
+the file is back. The one removal an agent folder has is the declaration
+changing: a folder the plan stops declaring loses its passages, as access
+withdrawn always does.
+
+### No secrets in the index
+
+A passage that looks like a credential is not indexed — the passage, not the
+file, so one leaked token does not hide a conversation. The patterns are part
+of the release and cannot be tuned by a deployment: two orgs that could tune
+them would hold two different indexes. The run reports how many passages were
+withheld, never the value and never the path. It is a net, not a guarantee.
+
+### What a deployment must change
+
+1. **`compiled-rbac-plan` 0.12** wherever agent folders are configured. Its
+   `agent_folders[]` section is what says which folders exist and which group
+   classifies each one; without it the run exits 1.
+2. **`agent_source.root` is now `/mnt/agent-hosts` with no host segment**, and
+   **`agent_source.surfaces` is refused**: the plan declares the folders now.
+3. **`purge_threshold` moves from `agent_source` to the org.** It governs the
+   removal guard for everything the org indexes, and sat in the agent section
+   while doing so — an org with no agent folders could not set it at all.
+
+Also in this release: `zstandard`, for Codex's archived conversations, and the
+image self-test now reads a compressed conversation at build time.
 
 ## v0.2.3 — 2026-11-14
 

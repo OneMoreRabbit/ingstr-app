@@ -59,42 +59,71 @@ class SourceConfig(BaseModel):
 
 
 class AgentSourceConfig(BaseModel):
-    """Where this host's agent export is mounted (ADR-0010 §7).
+    """Where beaver mounts the agents' folders (`ingstr-deploy` 0.8).
 
-    Optional as a *section*: a deployment that does not yet read agent surfaces
-    simply omits it. But `root` has **no default**, because ADR-0010 §7 exists
-    precisely because v0.1 left the mount path unnamed and three components each
-    invented one — the constitution §10 failure of inferring at the point of use
-    what should be declared at the point of ownership. A wrong-but-plausible
-    root is worse than a missing one: it resolves to a real place on the wrong
-    machine and succeeds.
+    Optional as a *section*: an org with no agent folders omits it and nothing
+    about that org changes. `root` has **no default**, because ADR-0010 §7
+    exists precisely because v0.1 left the mount path unnamed and three
+    components each invented one — the constitution §10 failure of inferring at
+    the point of use what should be declared at the point of ownership. A
+    wrong-but-plausible root is worse than a missing one: it resolves to a real
+    place on the wrong machine and succeeds.
 
-    The authoritative roots arrive as data in `compiled-rbac-plan` 0.6. This
-    stays config-driven until then so adopting 0.6 is a source change rather
-    than a behaviour change.
+    **`root` changed meaning in 0.8.** It was this host's export mount,
+    `/mnt/agent-hosts/<host>/`. It is now the root every path the plan declares
+    is relative to, `/mnt/agent-hosts/`, because `compiled-rbac-plan` 0.12
+    writes `<host>/` as the first segment of each path. A root with a host
+    segment still in it matches no declared path and reads nothing — silently,
+    which is why the check below is worth its lines.
     """
 
     model_config = ConfigDict(extra="forbid")
 
     root: Path
-    purge_threshold: float = Field(default=DEFAULT_PURGE_THRESHOLD, gt=0.0, le=1.0)
-    surfaces: list[str] = Field(default_factory=lambda: ["memory", "sessions", "scratch"])
+    #: Both refused rather than ignored. They are declared so the refusal can
+    #: name where the value went; `extra="forbid"` alone would say only
+    #: "unexpected key", which tells a deployment nothing about what to do.
+    surfaces: list[str] | None = None
+    purge_threshold: float | None = None
 
     @field_validator("surfaces")
     @classmethod
-    def _configs_is_never_ingested(cls, v: list[str]) -> list[str]:
-        """`configs/` is agent-private and carries no RBAC group (ADR-0010 §1).
+    def _the_plan_declares_the_folders_now(cls, v: list[str] | None) -> None:
+        """Which folders exist is the plan's to say, not a deployment's.
 
-        It is not in the export at all, so this cannot normally be reached — but
-        a config naming it would be a request to ingest secrets material, and
-        that is worth refusing loudly rather than silently finding nothing.
+        Until 0.8 this list chose them. `compiled-rbac-plan` 0.12 declares every
+        agent folder with its group and whether it is indexed, so a second
+        declaration here could only ever disagree with the first — and the way
+        two declarations of one thing fail is silently, with each side sure it
+        is right.
         """
-        if "configs" in v:
-            raise ValueError(
-                "'configs' is never ingested (ADR-0010 §1): it is agent-private, "
-                "carries no RBAC classification group, and is not in the export"
-            )
-        return v
+        if v is None:
+            return None
+        raise ValueError(
+            "agent_source.surfaces is no longer read: compiled-rbac-plan 0.12 "
+            "declares every agent folder and whether it is indexed. Delete the "
+            "key — a folder is indexed when the plan says so, and 'configs' "
+            "never is"
+        )
+
+    @field_validator("purge_threshold")
+    @classmethod
+    def _purge_threshold_belongs_to_the_org(cls, v: float | None) -> None:
+        """It governs the whole org, so it is declared on the org (0.8).
+
+        It has sat here since v0.1.1 while governing the blast-radius guard for
+        everything the org indexes (ADR-0010 §6 layer 3) — so an org with no
+        agent folders could not set it at all, and an org that added them would
+        silently change the bar for its ordinary data.
+        """
+        if v is None:
+            return None
+        raise ValueError(
+            "agent_source.purge_threshold moved to the org in ingstr-deploy "
+            "0.8: declare `purge_threshold:` beside `source:`. It governs the "
+            "removal guard for everything this org indexes, not only agent "
+            "folders"
+        )
 
 
 class PlanConfig(BaseModel):
@@ -161,6 +190,10 @@ class OrgConfig(BaseModel):
     org: str
     source: SourceConfig
     agent_source: AgentSourceConfig | None = None
+    #: Refuse a removal that would take more than this share of what this org
+    #: knows (ADR-0010 §6 layer 3). Declared on the org because that is what it
+    #: governs; it lived in `agent_source` until ingstr-deploy 0.8.
+    purge_threshold: float = Field(default=DEFAULT_PURGE_THRESHOLD, gt=0.0, le=1.0)
     qdrant: QdrantConfig
     state: StateConfig
 
@@ -178,6 +211,7 @@ class OrgView(BaseModel):
     org: str
     source: SourceConfig
     agent_source: AgentSourceConfig | None
+    purge_threshold: float
     plan: PlanConfig
     embedding: EmbeddingConfig
     qdrant: QdrantConfig
@@ -266,6 +300,7 @@ class IngstrConfig(BaseModel):
             org=chosen.org,
             source=chosen.source,
             agent_source=chosen.agent_source,
+            purge_threshold=chosen.purge_threshold,
             plan=self.plan,
             embedding=self.embedding,
             qdrant=chosen.qdrant,

@@ -9,6 +9,7 @@ import structlog
 import typer
 
 from . import __version__
+from .agent_folders import read_agent_folders
 from .config import DEFAULT_CONFIG_PATH, IngstrConfig, OrgView, load_config
 from .embed import EmbeddingClient
 from .exceptions import ConfigError, PlanError, UpstreamUnavailable
@@ -107,6 +108,7 @@ def ingest(
 
     plan = _load_plan_or_exit(cfg)
     _require_plan_path_if_granting(cfg, plan)
+    _require_agent_folders_in_the_plan(cfg, plan)
     api_key = _read_api_key_or_exit(cfg)
 
     mode = "full" if full else "incremental"
@@ -218,6 +220,47 @@ def ingest(
                 exit_code = _EXIT_PARTIAL
             else:
                 exit_code = _EXIT_PARTIAL if summary.files_errored > 0 else _EXIT_OK
+
+            folders = summary.agent_folders
+            if folders is not None:
+                typer.echo(
+                    f"agent folders:      {folders.folders_read} read, "
+                    f"{folders.folders_unavailable} unavailable of "
+                    f"{folders.folders_declared} declared"
+                )
+                typer.echo(
+                    f"conversations:      {folders.conversations_read} read, "
+                    f"{folders.turns_indexed} turn(s) indexed"
+                )
+                if folders.passages_with_secrets:
+                    # The number, never the value and never the path.
+                    typer.echo(
+                        f"withheld:           {folders.passages_with_secrets} "
+                        "passage(s) that look like a credential"
+                    )
+                if folders.lines_unrecognised:
+                    typer.echo(
+                        f"UNRECOGNISED LINES: {folders.lines_unrecognised} line(s) "
+                        "looked like speech and matched no runtime's shape — a "
+                        "runtime has probably changed its format",
+                        err=True,
+                    )
+
+            # Conversations are kept for ever, so a missing one is never a
+            # deletion to follow: it is the export, the host, or the retention
+            # setting. The passages stay and the run keeps saying so.
+            faults = state.outstanding_conversation_faults()
+            if faults:
+                gone, shrunk = faults.get("gone", 0), faults.get("shrunk", 0)
+                typer.echo(
+                    f"CONVERSATIONS MISSING: {gone} gone and {shrunk} shorter than "
+                    "ingstr has already read. Their passages were KEPT: "
+                    "conversations are kept for ever, so this is the export, the "
+                    "host or the retention setting, not a deletion. It does not "
+                    "clear itself.",
+                    err=True,
+                )
+                exit_code = _EXIT_PARTIAL
             _finalise_run(
                 state, run_id, started_at=started_at, summary=summary, exit_code=exit_code
             )
@@ -259,6 +302,7 @@ def stats(config: ConfigOption = DEFAULT_CONFIG_PATH, org: OrgOption = None) -> 
         last_incremental = state.get_last_run(mode="incremental")
         last_full = state.get_last_run(mode="full")
         refused = state.outstanding_refused_removal()
+        conversation_faults = state.outstanding_conversation_faults()
     finally:
         state.close()
 
@@ -292,6 +336,15 @@ def stats(config: ConfigOption = DEFAULT_CONFIG_PATH, org: OrgOption = None) -> 
             "access was taken away can still be found"
         )
         typer.echo(f"                    {refused.purge_refused_reason}")
+    if conversation_faults:
+        gone = conversation_faults.get("gone", 0)
+        shrunk = conversation_faults.get("shrunk", 0)
+        typer.echo(f"CONVERSATIONS MISSING: {gone} gone, {shrunk} shorter than read")
+        typer.echo(
+            "                    their passages were kept — conversations are "
+            "kept for ever, so this is the export, the host or the retention "
+            "setting, not a deletion"
+        )
     typer.echo(f"last successful:    {_run_summary(last_success)}")
     typer.echo(f"last incremental:   {_run_summary(last_incremental)}")
     typer.echo(f"last full:          {_run_summary(last_full)}")
@@ -368,6 +421,38 @@ def health(config: ConfigOption = DEFAULT_CONFIG_PATH, org: OrgOption = None) ->
                 + ("" if org_gids else " — this run would read nothing"),
             )
         )
+        if cfg.agent_source is not None:
+            if not plan.declares_agent_folders:
+                checks.append(
+                    (
+                        "agent_folders",
+                        False,
+                        "this org reads agent folders and the plan has no "
+                        "agent_folders section (compiled-rbac-plan 0.12)",
+                    )
+                )
+            else:
+                readable, folder_check = read_agent_folders(cfg, plan, dry_run=True)
+                # Declared but not mounted is a FAILURE: somebody meant those
+                # conversations to be searchable and they are not. Mounted but
+                # undeclared is not even visible from here, and is not ingstr's
+                # to mind — nothing is read without a declaration.
+                checks.append(
+                    (
+                        "agent_folders",
+                        folder_check.folders_unavailable == 0,
+                        f"{len(readable)} of {folder_check.folders_declared} "
+                        f"declared folder(s) readable under "
+                        f"{cfg.agent_source.root}"
+                        + (
+                            f"; {folder_check.folders_unavailable} declared and "
+                            "not readable (missing mount, missing marker, or "
+                            "missing folder)"
+                            if folder_check.folders_unavailable
+                            else ""
+                        ),
+                    )
+                )
     except PlanError as e:
         checks.append(("plan", False, str(e)))
 
@@ -469,6 +554,29 @@ def _require_plan_path_if_granting(cfg: OrgView, plan: ResolvedPlan) -> None:
             err=True,
         )
         raise typer.Exit(code=_EXIT_CONFIG)
+
+
+def _require_agent_folders_in_the_plan(cfg: OrgView, plan: ResolvedPlan) -> None:
+    """Stop if this org reads agent folders and the plan cannot say which.
+
+    `agent_folders[]` arrived in `compiled-rbac-plan` 0.12. Without it there is
+    nothing that says which folders exist or which group classifies them — and
+    the group cannot be taken from the files, because a seat's conversations
+    belong to its home user. The alternative to stopping is reading an agent's
+    folders under a group nobody declared, which is the one mistake this whole
+    design exists to prevent.
+    """
+    if cfg.agent_source is None or plan.declares_agent_folders:
+        return
+    typer.echo(
+        "config error: this org declares agent_source, so it reads the agents' "
+        "folders, and the plan carries no agent_folders section. That section "
+        "arrived in compiled-rbac-plan 0.12 (rbac-compiler v0.7.4) and is what "
+        "says which folders exist and which group classifies each one. Roll the "
+        "compiler and apply the plan, or remove agent_source from this org.",
+        err=True,
+    )
+    raise typer.Exit(code=_EXIT_CONFIG)
 
 
 def _load_plan_or_exit(cfg: OrgView) -> ResolvedPlan:

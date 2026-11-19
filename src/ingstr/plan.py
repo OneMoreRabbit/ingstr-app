@@ -8,6 +8,33 @@ from .exceptions import PlanError
 
 
 @dataclass(frozen=True)
+class AgentFolder:
+    """One agent folder the plan declares, as beaver sees it.
+
+    `compiled-rbac-plan` 0.12, section `agent_folders[]`. The group comes from
+    the declaration and never from the files: a seat's conversations belong to
+    its home user, so their group says nothing about who may read them.
+    """
+
+    name: str
+    kind: str
+    host: str
+    org: str
+    folder: str
+    #: `<host>/<org>/<name>/<folder>/`, relative to the `agent_hosts` root,
+    #: in the plan's path form (no leading slash, one trailing slash).
+    path: str
+    group: str
+    indexed: bool
+
+
+#: The folders the design names (`agent-folders-design-v0_1` §2). `configs` is
+#: never indexed; it is listed so a row naming it is a known row with
+#: `indexed: false` rather than an unknown folder.
+_AGENT_FOLDERS = frozenset({"sessions", "memory", "scratch", "configs"})
+
+
+@dataclass(frozen=True)
 class ResolvedPlan:
     """Authoritative classification state for one Ingstr run.
 
@@ -24,8 +51,18 @@ class ResolvedPlan:
     #: to `meta.path_roots.acl`). A path may legally carry several grants with
     #: different groups, which is why the value is a set and not a name.
     grants: dict[str, frozenset[str]]
-    plan_source_path: Path
-    map_source_path: Path
+    #: Every row of `agent_folders[]`, or an empty tuple when the plan carries
+    #: no section (0.11 and earlier). Whether that absence is an error depends
+    #: on whether this org configured agent folders, which the plan cannot
+    #: know — so the refusal lives in the caller, not here.
+    agent_folders: tuple[AgentFolder, ...] = ()
+    #: True when the plan carried an `agent_folders` section at all, even
+    #: empty. An empty section means "no agent declares folders"; a missing
+    #: one means "this plan is older than 0.12", and they call for different
+    #: answers.
+    declares_agent_folders: bool = False
+    plan_source_path: Path = Path("/dev/null")
+    map_source_path: Path = Path("/dev/null")
 
     def grant_for(self, plan_path: str) -> tuple[str, frozenset[str]] | None:
         """The grant governing `plan_path`, or None.
@@ -63,6 +100,16 @@ class ResolvedPlan:
     def org_of_group(self, group: str) -> str | None:
         return self.group_org.get(group)
 
+    def indexed_folders_for_org(self, org: str) -> tuple[AgentFolder, ...]:
+        """The agent folders this org indexes, in the plan's order.
+
+        Only rows marked `indexed`. `configs` is never indexed and the contract
+        says so, but this reads the flag rather than the name: a deployment
+        should be able to see that a folder is not indexed, not have to know
+        it.
+        """
+        return tuple(f for f in self.agent_folders if f.org == org and f.indexed)
+
 
 def load_plan(compiled_plan_path: Path, group_gid_map_path: Path) -> ResolvedPlan:
     """Load both upstream YAMLs, invert the GID map, and cross-validate.
@@ -91,6 +138,9 @@ def load_plan(compiled_plan_path: Path, group_gid_map_path: Path) -> ResolvedPla
     required_groups = _load_required_groups(compiled_plan_path)
     group_org = _load_group_orgs(compiled_plan_path, required_groups)
     grants = _load_acl_grants(compiled_plan_path, required_groups)
+    agent_folders, declares_agent_folders = _load_agent_folders(
+        compiled_plan_path, required_groups
+    )
     name_to_gid = _load_group_gid_map(group_gid_map_path)
 
     unknown = sorted(set(name_to_gid) - required_groups)
@@ -122,6 +172,8 @@ def load_plan(compiled_plan_path: Path, group_gid_map_path: Path) -> ResolvedPla
         required_groups=frozenset(required_groups),
         group_org=group_org,
         grants=grants,
+        agent_folders=agent_folders,
+        declares_agent_folders=declares_agent_folders,
         plan_source_path=compiled_plan_path,
         map_source_path=group_gid_map_path,
     )
@@ -262,3 +314,87 @@ def _read_yaml(path: Path) -> dict[str, Any]:
     if not isinstance(raw, dict):
         raise PlanError(f"{path}: root must be a mapping")
     return raw
+
+
+def _load_agent_folders(
+    path: Path, required_groups: set[str]
+) -> tuple[tuple[AgentFolder, ...], bool]:
+    """Read `agent_folders[]`: the agents' own folders, as beaver sees them.
+
+    `compiled-rbac-plan` 0.12. Each row declares one folder of one agent or
+    seat, and the group that classifies everything in it. The declaration is
+    the whole point: a seat's files belong to its home user (uid 1000), so
+    their group says nothing about who may read them
+    ([[agent-folders-design-v0_1]] §5).
+
+    Returns the rows and whether the section was present at all. An EMPTY
+    section means no agent has declared folders; a MISSING one means the plan
+    predates 0.12. Only the caller knows whether this org configured agent
+    folders, so only the caller can say which of those is an error — this
+    function reports the difference rather than choosing.
+    """
+    raw = _read_yaml(path)
+    rows = raw.get("agent_folders")
+    if rows is None:
+        return (), False
+    if not isinstance(rows, list):
+        raise PlanError(
+            f"{path}: 'agent_folders' must be a list of rows (compiled-rbac-plan 0.12)"
+        )
+    out: list[AgentFolder] = []
+    for row in rows:
+        if not isinstance(row, dict):
+            raise PlanError(f"{path}: each 'agent_folders' row must be a mapping, got {row!r}")
+        missing = [
+            k for k in ("name", "kind", "host", "org", "folder", "path", "group")
+            if not isinstance(row.get(k), str)
+        ]
+        if missing:
+            raise PlanError(
+                f"{path}: an 'agent_folders' row is missing {missing} "
+                f"(compiled-rbac-plan 0.12): {row!r}"
+            )
+        indexed = row.get("indexed")
+        if not isinstance(indexed, bool):
+            raise PlanError(
+                f"{path}: 'agent_folders' row for {row['name']}/{row['folder']} needs a "
+                "boolean 'indexed'. A deployment should be able to READ that a folder is "
+                "not indexed, not have to know it from the folder's name"
+            )
+        folder = row["folder"]
+        if folder not in _AGENT_FOLDERS:
+            raise PlanError(
+                f"{path}: 'agent_folders' row names folder {folder!r}, which is not one of "
+                f"{sorted(_AGENT_FOLDERS)} (agent-folders-design-v0_1 §2)"
+            )
+        if folder == "configs" and indexed:
+            raise PlanError(
+                f"{path}: 'agent_folders' marks {row['name']}'s 'configs' as indexed. "
+                "configs is never indexed (design D7): it holds settings and is a cleaned "
+                "copy, and indexing it would put an agent's configuration into search"
+            )
+        path_value = row["path"]
+        if path_value.startswith("/") or not path_value.endswith("/"):
+            raise PlanError(
+                f"{path}: 'agent_folders' path {path_value!r} must be written as the plan "
+                "writes paths: no leading slash, exactly one trailing slash"
+            )
+        if row["group"] not in required_groups:
+            raise PlanError(
+                f"{path}: 'agent_folders' row for {row['name']}/{folder} names group "
+                f"{row['group']!r}, which is not in required_groups. The contract "
+                "guarantees it is, so this plan is inconsistent with itself"
+            )
+        out.append(
+            AgentFolder(
+                name=row["name"],
+                kind=row["kind"],
+                host=row["host"],
+                org=row["org"],
+                folder=folder,
+                path=path_value,
+                group=row["group"],
+                indexed=indexed,
+            )
+        )
+    return tuple(out), True
