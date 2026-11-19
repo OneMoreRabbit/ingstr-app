@@ -353,7 +353,9 @@ def opener_for(path: Path) -> Callable[[Path], Any]:
     return _open_compressed if path.suffix == COMPRESSED_SUFFIX else _open_plain
 
 
-def read_conversation(path: Path, *, from_line: int = 0) -> ConversationRead:
+def read_conversation(
+    path: Path, *, from_line: int = 0, conversation_id: str | None = None
+) -> ConversationRead:
     """Read the turns of a conversation file after `from_line`.
 
     `from_line` is the last line already indexed, counting from 1; 0 reads the
@@ -363,19 +365,21 @@ def read_conversation(path: Path, *, from_line: int = 0) -> ConversationRead:
     live one.
     """
     result = ConversationRead(last_line=from_line)
-    conversation_id: str | None = None
+    # A COMPRESSED CONVERSATION CANNOT GROW. Nothing is appended to a file that
+    # has been compressed, so its last line is complete even without a
+    # trailing newline — and holding it back would mean never indexing the
+    # last turn of every archived conversation.
+    can_grow = path.suffix != COMPRESSED_SUFFIX
     with opener_for(path)(path) as handle:
         for line_number, raw in enumerate(handle, start=1):
-            if line_number <= from_line:
-                # The id is in the file's first line, which a resumed read
-                # starts after — so it is taken from the file name instead.
+            if line_number <= from_line and not (line_number == 1 and conversation_id is None):
                 continue
             # A LINE WITHOUT A TRAILING NEWLINE IS A LINE STILL BEING WRITTEN.
             # The reader and the runtime are looking at the same file, so this
             # is ordinary rather than exceptional. Advancing the read position
             # past it would lose that turn FOR EVER: the runtime finishes the
             # line, and the next run starts after it.
-            if not raw.endswith("\n"):
+            if can_grow and not raw.endswith("\n"):
                 result.incomplete_tail = True
                 break
             text = raw.strip()
@@ -392,8 +396,13 @@ def read_conversation(path: Path, *, from_line: int = 0) -> ConversationRead:
                 result.unparsed += 1
                 result.last_line = line_number
                 continue
-            result.last_line = line_number
             conversation_id = conversation_id or _session_meta_id(line)
+            if line_number <= from_line:
+                # Line 1, re-read only to recover the conversation id. Its
+                # turns were indexed by an earlier run, and the read position
+                # must not move backwards.
+                continue
+            result.last_line = line_number
             turns = claude_turns(line, line_number)
             if turns is None:
                 turns = codex_turns(
@@ -426,12 +435,12 @@ def _session_meta_id(line: dict[str, Any]) -> str | None:
 
 
 def _conversation_id_from_name(path: Path) -> str:
-    """The fallback id: the file name, which Codex builds from the id.
+    """The last resort: the file name, when the file has no `session_meta`.
 
-    Used when a resumed read starts after the first line. It is stable for the
-    life of the file, which is what a passage id needs — and when a file is
-    archived under a new name the conversation is re-read and re-written under
-    the same ids as before, because this is only the fallback.
+    Not used for a resumed read — line 1 is re-read for the id on every pass,
+    and the caller also passes the id it stored — because a conversation whose
+    id changed between runs would get two sets of passage ids and would look
+    like two different conversations to the move check.
     """
     name = path.name
     for suffix in (".zst", ".jsonl"):

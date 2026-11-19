@@ -549,3 +549,41 @@ def test_a_compressed_copy_beside_the_original_is_one_conversation(tmp_path, run
     assert summary.agent_folders.conversations_duplicate_copy == 1
     points = [p for call in qdrant.upsert_points.call_args_list for p in call.args[0]]
     assert len(points) == 1
+
+
+def test_a_codex_conversation_keeps_one_id_across_runs(tmp_path, run):
+    """The id must not change between the first run and the next.
+
+    It did: `session_meta` on the first pass, the file name on a resumed one.
+    The same conversation then had two sets of passage ids — every turn
+    indexed twice — and the move check compared unlike values.
+    """
+    mount, conversation = _mount_with_conversation(tmp_path, [_turn("t1", "first")])
+    conversation.unlink()
+    rollout = _codex_conversation(
+        conversation.parent, "rollout-2026-11-19T11-00-00-codex-conv-9.jsonl",
+        compressed=False,
+    )
+    state = StateDB(tmp_path / "state.db")
+    try:
+        _, first, _ = run(mount, _plan(_folder()), state=state)
+        with rollout.open("a") as handle:
+            handle.write(json.dumps({
+                "type": "response_item",
+                "ordinal": 2,
+                "payload": {
+                    "type": "message", "role": "assistant", "phase": "final_answer",
+                    "content": [{"type": "output_text", "text": "and it is beaver that mounts it"}],
+                },
+            }) + "\n")
+        _, second, _ = run(mount, _plan(_folder()), state=state)
+    finally:
+        state.close()
+
+    ids = [
+        p.payload["conversation_id"]
+        for call in (first, second)
+        for args in call.upsert_points.call_args_list
+        for p in args.args[0]
+    ]
+    assert ids == ["codex-conv-9", "codex-conv-9"]

@@ -460,17 +460,59 @@ def test_a_codex_turn_falls_back_to_the_line_number(tmp_path):
     assert read.turns[0].conversation_id == "codex-conv-1"
 
 
-def test_a_resumed_codex_read_takes_the_id_from_the_file_name(tmp_path):
-    """The `session_meta` line is line 1, which a resumed read starts after."""
+def test_a_resumed_read_keeps_the_same_conversation_id(tmp_path):
+    """The id must not change between runs.
+
+    The first build took it from `session_meta` on the first run and from the
+    file name on the next, so the same conversation got two ids: its passages
+    were written twice under different ids, and the move check compared unlike
+    values. Line 1 is re-read for the id on every pass.
+    """
     path = _write(
         tmp_path,
         "rollout-2026-11-19T11-00-00-codex-conv-1.jsonl",
-        [_CODEX_META, _codex_line(), _codex_line()],
+        [_CODEX_META, _codex_line()],
     )
-    read = read_conversation(path, from_line=2)
-    assert read.turns[0].conversation_id == (
-        "rollout-2026-11-19T11-00-00-codex-conv-1"
-    )
+    first = read_conversation(path)
+    assert first.turns[0].conversation_id == "codex-conv-1"
+
+    with path.open("a") as handle:
+        handle.write(json.dumps(_codex_line(ordinal=3)) + "\n")
+    second = read_conversation(path, from_line=first.last_line)
+
+    assert [t.conversation_id for t in second.turns] == ["codex-conv-1"]
+    assert second.last_line == 3
+
+
+def test_a_stored_conversation_id_is_used_as_given(tmp_path):
+    """The caller holds the id it wrote with; re-reading line 1 is the belt,
+    this is the braces — a file whose first line has gone still keeps its
+    identity."""
+    path = _write(tmp_path, "rollout.jsonl", [_codex_line()])
+    read = read_conversation(path, conversation_id="codex-conv-1")
+    assert read.turns[0].conversation_id == "codex-conv-1"
+
+
+def test_a_file_with_no_session_meta_falls_back_to_its_name(tmp_path):
+    path = _write(tmp_path, "rollout-codex-conv-5.jsonl", [_codex_line()])
+    read = read_conversation(path)
+    assert read.turns[0].conversation_id == "rollout-codex-conv-5"
+
+
+def test_the_last_line_of_a_compressed_conversation_is_complete(tmp_path):
+    """A compressed file cannot grow, so its last line is finished even
+    without a trailing newline. Held back, the last turn of every archived
+    conversation would never be indexed."""
+    zstandard = pytest.importorskip("zstandard")
+    raw = (
+        json.dumps(_CODEX_META) + "\n" + json.dumps(_codex_line())  # no newline
+    ).encode()
+    path = tmp_path / "rollout.jsonl.zst"
+    path.write_bytes(zstandard.ZstdCompressor().compress(raw))
+
+    read = read_conversation(path)
+    assert len(read.turns) == 1
+    assert read.incomplete_tail is False
 
 
 # ── a long turn is chunked within itself ───────────────────────────────────

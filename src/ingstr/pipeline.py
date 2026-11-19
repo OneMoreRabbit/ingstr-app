@@ -974,7 +974,14 @@ def _index_conversation(
     # before: the thorough run stays thorough without duplicating anything.
     from_line = 0 if full else (known.last_line if known else 0)
     try:
-        read = read_conversation(path, from_line=from_line)
+        read = read_conversation(
+            path,
+            from_line=from_line,
+            # The id this conversation was written with. Re-reading line 1
+            # recovers it too; passing it means a file whose first line has
+            # gone still keeps its identity, and its passages keep their ids.
+            conversation_id=(known.conversation_id or None) if known else None,
+        )
     except OSError as e:
         _log.warning("conversation_unreadable", agent=folder.name, error=str(e))
         folder_summary.documents_errored += 1
