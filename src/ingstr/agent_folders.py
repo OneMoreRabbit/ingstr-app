@@ -34,8 +34,8 @@ import structlog
 
 from .availability import Availability, read_export_state
 from .chunk import Chunk
-from .config import OrgView
-from .conversations import COMPRESSED_SUFFIX
+from .config import ChunkingConfig, OrgView
+from .conversations import COMPRESSED_SUFFIX, split_turn_text
 from .plan import AgentFolder, ResolvedPlan
 from .secrets_net import looks_like_a_secret
 from .state import ConversationRead
@@ -68,8 +68,18 @@ class AgentFolderSummary:
     #: zero means a runtime changed its format and the rule needs looking at.
     lines_unrecognised: int = 0
     documents_indexed: int = 0
+    #: Files under a `sessions` folder that are neither a conversation nor a
+    #: memory note — tool output and the like. Counted so "there are things
+    #: here we do not index" is visible rather than inferred from a silence.
+    files_skipped: int = 0
     documents_errored: int = 0
     conversations_gone: int = 0
+    #: Conversations found at a new path under the same agent. Codex archives
+    #: by moving a file, so this is ordinary work and not a fault.
+    conversations_moved: int = 0
+    #: A conversation met twice in one run — a compressed copy beside the
+    #: original. One conversation in two files, never two conversations.
+    conversations_duplicate_copy: int = 0
     conversations_shrunk: int = 0
     chunks_written: int = 0
     #: Absolute paths read this pass, so the caller can keep them out of the
@@ -106,14 +116,23 @@ def turn_text_is_indexable(text: str, summary: AgentFolderSummary) -> bool:
     return False
 
 
-def chunks_for_turn(text: str, index: int) -> list[Chunk]:
-    """One turn, one passage — chunked within itself if it is long.
+def chunks_for_turn(text: str, chunking: ChunkingConfig) -> list[Chunk]:
+    """One turn, one or more passages — chunked within itself if it is long.
 
     Never across a turn boundary: a passage carries exactly one speaker, so a
     search result is attributable to the person or to the agent and not to a
-    seam between them (arch agreed, 2026-11-19).
+    seam between them (arch agreed, 2026-11-19). A long answer or a pasted
+    document still has to be split, or the embedder truncates it or refuses it.
     """
-    return [Chunk(text=text, index=index, total=index + 1)]
+    pieces = split_turn_text(
+        text,
+        size=chunking.chunk_size_chars,
+        overlap=chunking.chunk_overlap_chars,
+    )
+    return [
+        Chunk(text=piece, index=index, total=len(pieces))
+        for index, piece in enumerate(pieces)
+    ]
 
 
 def read_agent_folders(
@@ -181,3 +200,24 @@ def conversation_fault(path: Path, known: ConversationRead | None) -> str | None
     if known is None:
         return None
     return "shrunk" if path.stat().st_size < known.size_bytes else None
+
+
+#: Inside a `sessions` folder a file is indexed only if it is a conversation,
+#: or a note under a `memory/` folder. Claude Code writes other things there —
+#: large tool output saved beside a session among them — and indexing those as
+#: documents would put tool output into search, which D14 forbids. `memory` and
+#: `scratch` folders are unchanged: everything in them is a document.
+_SESSIONS_FOLDER = "sessions"
+_MEMORY_DIRECTORY = "memory"
+
+
+def indexable_as_a_document(folder: AgentFolder, path: Path) -> bool:
+    """Whether a non-conversation file under a declared folder is indexed.
+
+    The `sessions` folder is the exception, and it is an exception about
+    content rather than about format: what sits beside a conversation is the
+    machine traffic the conversation rule exists to leave out.
+    """
+    if folder.folder != _SESSIONS_FOLDER:
+        return True
+    return _MEMORY_DIRECTORY in path.parts

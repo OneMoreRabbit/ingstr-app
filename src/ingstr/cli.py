@@ -238,6 +238,12 @@ def ingest(
                         f"withheld:           {folders.passages_with_secrets} "
                         "passage(s) that look like a credential"
                     )
+                if folders.conversations_moved or folders.conversations_duplicate_copy:
+                    typer.echo(
+                        f"                    {folders.conversations_moved} moved "
+                        f"(archived), {folders.conversations_duplicate_copy} second "
+                        "copy of a conversation already read"
+                    )
                 if folders.lines_unrecognised:
                     typer.echo(
                         f"UNRECOGNISED LINES: {folders.lines_unrecognised} line(s) "

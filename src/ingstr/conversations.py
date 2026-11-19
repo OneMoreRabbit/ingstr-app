@@ -58,8 +58,31 @@ _TOOL_RESULT_KEY = "toolUseResult"
 
 _ROLE_OF_LINE = {"user": "person", "assistant": "agent"}
 
-_SYSTEM_REMINDER_OPEN = "<system-reminder>"
-_SYSTEM_REMINDER_CLOSE = "</system-reminder>"
+#: Codex: the one line type that carries a message. `event_msg`,
+#: `item_completed` and `compacted` repeat the same material.
+_CODEX_RESPONSE_ITEM = "response_item"
+
+#: A partial answer is superseded by the final answer in the same turn.
+_CODEX_PARTIAL = "partial_answer"
+
+#: Where Codex says what KIND of content a message holds. Without it, `role:
+#: user` cannot be read as "a person typed this".
+_CODEX_KINDS_KEY = "internal_chat_message_metadata_passthrough"
+_CODEX_PERSON_KINDS = frozenset({"user.text"})
+
+#: Text a harness injected into a turn, wrapped in a tag of its own. Claude
+#: Code writes system reminders; Codex writes its environment context and the
+#: instructions it was given. Neither was typed by anybody, and both repeat on
+#: every turn — indexed, they would be most of what a search over an agent's
+#: conversations returned. The tag names are declared here rather than guessed
+#: at the point of use, and a name agent-seat confirms differently is one line
+#: to change.
+_INJECTED_TAGS = (
+    "system-reminder",
+    "environment_context",
+    "user_instructions",
+    "AGENTS.md",
+)
 
 #: Codex compresses archived conversations. A compressed file is read whole
 #: every time: nothing is appended to a file that has been compressed, so there
@@ -95,22 +118,28 @@ class ConversationRead:
     #: Lines that looked like speech and matched neither runtime's shape. A
     #: number above zero is the signal that a runtime changed its format.
     unrecognised: int = 0
-    #: Lines that were not JSON at all. A conversation being written while it
-    #: is read can end in half a line, so this is expected to be 0 or 1.
+    #: Lines that were not JSON at all. Counted, but they do not stop the
+    #: read: a file that holds one bad line in its middle is still a
+    #: conversation.
     unparsed: int = 0
+    #: True when the file ended mid-line. The read position stops BEFORE that
+    #: line, so the turn is indexed once, when the runtime has finished
+    #: writing it.
+    incomplete_tail: bool = False
 
 
-def is_wholly_a_system_reminder(text: str) -> bool:
-    """True when the text is only a reminder the harness injected.
+def is_wholly_injected(text: str) -> bool:
+    """True when the text is only something a harness put there.
 
-    These arrive inside a user line and were typed by nobody. The limit, which
-    the architecture document states rather than hides: a line that MIXES a
-    person's words with injected text keeps both, because the format carries
+    These arrive as ordinary user messages and were typed by nobody. The limit,
+    which the architecture document states rather than hides: a turn that MIXES
+    a person's words with injected text keeps both, because the format carries
     nothing that separates them.
     """
     stripped = text.strip()
-    return stripped.startswith(_SYSTEM_REMINDER_OPEN) and stripped.endswith(
-        _SYSTEM_REMINDER_CLOSE
+    return any(
+        stripped.startswith(f"<{tag}>") and stripped.endswith(f"</{tag}>")
+        for tag in _INJECTED_TAGS
     )
 
 
@@ -149,7 +178,7 @@ def _turns_from(
         return []
     out: list[Turn] = []
     for index, text in enumerate(_texts_of(message)):
-        if not text.strip() or is_wholly_a_system_reminder(text):
+        if not text.strip() or is_wholly_injected(text):
             continue
         out.append(
             Turn(
@@ -183,6 +212,19 @@ def claude_turns(line: dict[str, Any], line_number: int) -> list[Turn] | None:
         return None
     if line.get(_TOOL_RESULT_KEY) is not None:
         return []
+    # `isMeta` is command output and injected notes; `isCompactSummary` is a
+    # summary the model wrote of the conversation it is already in. Indexing
+    # either returns the same words twice to a search.
+    if line.get("isMeta") or line.get("isCompactSummary"):
+        return []
+    if not isinstance(line.get("sessionId") or line.get("session_id"), str) or not isinstance(
+        line.get("uuid"), str
+    ):
+        # Speech-shaped, but a passage built from it could not have a stable
+        # id. Returning None rather than [] puts it in the unrecognised count:
+        # a runtime that renamed these keys must not be able to empty the
+        # index in silence.
+        return None
     return _turns_from(
         message=message,
         line_type=str(line_type),
@@ -194,14 +236,35 @@ def claude_turns(line: dict[str, Any], line_number: int) -> list[Turn] | None:
     )
 
 
-def codex_turns(line: dict[str, Any], line_number: int) -> list[Turn] | None:
+def codex_turns(
+    line: dict[str, Any], line_number: int, conversation_id: str
+) -> list[Turn] | None:
     """Turns from a Codex line, or None when it is not that shape.
 
-    Codex wraps each item: the message sits in `payload`, with the role on it
-    rather than on the line. A line whose payload is a function call or its
-    output is this shape and yields nothing — the same rule as Claude's tool
-    traffic, which is why it returns `[]` and not None.
+    Written against the shapes agent-seat confirmed for Codex 0.166.0
+    (hub #16853), and deliberately narrow, because that answer came with its
+    own evidence limit: a generated schema and older local files, not a live
+    0.166.0 rollout. So anything this does not recognise is COUNTED, never
+    quietly dropped.
+
+    - **One message source.** Only a `response_item` whose payload is a
+      `message`. `event_msg`, `item_completed` and `compacted` repeat material
+      the response items already hold, and indexing both would return the same
+      words twice to one search.
+    - **Neither id comes from the line.** The conversation id is in the file's
+      `session_meta`; `payload.id` is optional, so the turn id is the line's
+      `ordinal` when it has one and its line number otherwise — stable because
+      the file is append-only.
+    - **`role: user` is not evidence of a person.** Codex puts its AGENTS.md
+      instructions and environment context in user messages too. The kinds in
+      `internal_chat_message_metadata_passthrough.content_item_kinds` say
+      which it is; without them, a user message is NOT indexed as somebody's
+      words, because a wrong attribution is worse than a missing passage.
+    - **`developer` is never a turn**, and a `partial_answer` is superseded by
+      the final answer that follows it.
     """
+    if line.get("type") != _CODEX_RESPONSE_ITEM:
+        return None
     payload = line.get("payload")
     if not isinstance(payload, dict):
         return None
@@ -209,16 +272,49 @@ def codex_turns(line: dict[str, Any], line_number: int) -> list[Turn] | None:
         return []
     role = payload.get("role")
     if role not in _SPOKEN_LINE_TYPES:
+        # `developer` lands here: permissions and hook text, never a turn.
         return []
+    if payload.get("phase") == _CODEX_PARTIAL:
+        return []
+    if role == "user" and not _is_a_person_speaking(payload):
+        # Not dropped in silence: without the kinds there is no way to tell a
+        # person's prompt from injected instructions, and that uncertainty is
+        # exactly what the unrecognised count is for. agent-seat's answer came
+        # with an evidence limit (a generated schema and older files, not a
+        # live 0.166.0 rollout), so this number is how the estate finds out
+        # that the limit mattered.
+        return None
+    ordinal = line.get("ordinal")
+    turn_id = f"ordinal-{ordinal}" if isinstance(ordinal, int) else f"line-{line_number}"
     return _turns_from(
         message=payload,
         line_type=str(role),
-        conversation_id=line.get("conversation_id") or line.get("session_id"),
-        turn_id=line.get("id") or payload.get("id"),
+        conversation_id=conversation_id,
+        turn_id=turn_id,
         timestamp=line.get("timestamp"),
-        sidechain=bool(line.get("isSidechain")),
+        sidechain=False,
         line_number=line_number,
     )
+
+
+def _is_a_person_speaking(payload: dict[str, Any]) -> bool:
+    """Whether a Codex `role: user` message is really the person's words.
+
+    The kinds are the only evidence the format carries: `user.text` is a
+    person, `agents_md.instructions` and `environments.environment_context`
+    are injected and repeat on every conversation. When the field is absent —
+    older files, and anything 0.166.0 does differently — this returns False,
+    so the message is not indexed and the caller counts it. That way the cost
+    of not knowing is a missing passage somebody can ask about, rather than an
+    agent's instructions filed under what a person said.
+    """
+    passthrough = payload.get(_CODEX_KINDS_KEY)
+    if not isinstance(passthrough, dict):
+        return False
+    kinds = passthrough.get("content_item_kinds")
+    if not isinstance(kinds, list):
+        return False
+    return any(kind in _CODEX_PERSON_KINDS for kind in kinds)
 
 
 def _looks_like_speech(line: dict[str, Any]) -> bool:
@@ -232,6 +328,7 @@ def _looks_like_speech(line: dict[str, Any]) -> bool:
         return True
     payload = line.get("payload")
     return isinstance(payload, dict) and payload.get("type") == "message"
+
 
 
 @contextmanager
@@ -266,28 +363,116 @@ def read_conversation(path: Path, *, from_line: int = 0) -> ConversationRead:
     live one.
     """
     result = ConversationRead(last_line=from_line)
+    conversation_id: str | None = None
     with opener_for(path)(path) as handle:
         for line_number, raw in enumerate(handle, start=1):
             if line_number <= from_line:
+                # The id is in the file's first line, which a resumed read
+                # starts after — so it is taken from the file name instead.
                 continue
-            result.last_line = line_number
+            # A LINE WITHOUT A TRAILING NEWLINE IS A LINE STILL BEING WRITTEN.
+            # The reader and the runtime are looking at the same file, so this
+            # is ordinary rather than exceptional. Advancing the read position
+            # past it would lose that turn FOR EVER: the runtime finishes the
+            # line, and the next run starts after it.
+            if not raw.endswith("\n"):
+                result.incomplete_tail = True
+                break
             text = raw.strip()
             if not text:
+                result.last_line = line_number
                 continue
             try:
                 line = json.loads(text)
             except ValueError:
                 result.unparsed += 1
+                result.last_line = line_number
                 continue
             if not isinstance(line, dict):
                 result.unparsed += 1
+                result.last_line = line_number
                 continue
+            result.last_line = line_number
+            conversation_id = conversation_id or _session_meta_id(line)
             turns = claude_turns(line, line_number)
             if turns is None:
-                turns = codex_turns(line, line_number)
+                turns = codex_turns(
+                    line, line_number, conversation_id or _conversation_id_from_name(path)
+                )
             if turns is None:
                 if _looks_like_speech(line):
                     result.unrecognised += 1
                 continue
             result.turns.extend(turns)
     return result
+
+
+def _session_meta_id(line: dict[str, Any]) -> str | None:
+    """The conversation id Codex writes in the file's first line.
+
+    A `response_item` line carries no conversation id of its own, so without
+    this every Codex turn would be skipped for want of an id — silently, which
+    is the failure this module is built to avoid.
+    """
+    if line.get("type") != "session_meta":
+        return None
+    payload = line.get("payload")
+    source = payload if isinstance(payload, dict) else line
+    for key in ("id", "conversation_id", "session_id"):
+        value = source.get(key)
+        if isinstance(value, str) and value:
+            return value
+    return None
+
+
+def _conversation_id_from_name(path: Path) -> str:
+    """The fallback id: the file name, which Codex builds from the id.
+
+    Used when a resumed read starts after the first line. It is stable for the
+    life of the file, which is what a passage id needs — and when a file is
+    archived under a new name the conversation is re-read and re-written under
+    the same ids as before, because this is only the fallback.
+    """
+    name = path.name
+    for suffix in (".zst", ".jsonl"):
+        if name.endswith(suffix):
+            name = name[: -len(suffix)]
+    return name
+
+
+def split_turn_text(text: str, *, size: int, overlap: int) -> list[str]:
+    """Split one turn's words into passage-sized pieces.
+
+    Chunked WITHIN the turn and never across two, so every passage carries one
+    speaker and a search result is attributable to the person or to the agent.
+    A turn is often short and then this returns it whole; it is sometimes a
+    pasted document, and the embedder would silently truncate or refuse that.
+
+    Split on a blank line, then on a line ending, then — only if a single line
+    is longer than a passage — mid-line. Prose survives the first two; the
+    third is for a pasted file with no line breaks at all.
+    """
+    if size <= 0:
+        raise ValueError("chunk size must be positive")
+    if len(text) <= size:
+        return [text]
+
+    step = max(1, size - max(0, overlap))
+    pieces: list[str] = []
+    start = 0
+    while start < len(text):
+        end = min(start + size, len(text))
+        if end < len(text):
+            window = text[start:end]
+            cut = max(window.rfind("\n\n"), window.rfind("\n"))
+            # Only honour a break in the second half: a break near the start
+            # would make passages that are mostly overlap.
+            if cut > size // 2:
+                end = start + cut
+        piece = text[start:end].strip()
+        if piece:
+            pieces.append(piece)
+        if end >= len(text):
+            break
+        start = max(end, start + step) if overlap == 0 else max(end - overlap, start + 1)
+    return pieces or [text]

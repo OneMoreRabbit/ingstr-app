@@ -12,10 +12,7 @@ Newest first. One entry per release tag, written in the same commit that cuts th
 tag. Plain English: a reader skimming this page should know what changed and
 whether they have to act.
 
-## Unreleased — agent folders
-
-**The release number is the operator's to set**; this entry moves under it when
-the tag is cut. Nothing below is deployed.
+## v0.2.4 — 2026-11-19
 
 **TL;DR:** an org may now have a **second source** — the agents' and seats' own
 `sessions`, `memory` and `scratch`, read through beaver's mount and classified
@@ -36,15 +33,39 @@ the content, the agent's thinking 20%, and the words about 10%.
 - **Never `thinking`** (arch, 2026-11-19): drafting rather than what was said,
   and the group would be reading an agent's private reasoning.
 - Sub-agent turns are indexed, flagged `sidechain` in the payload.
-- A block that is wholly a system reminder is dropped. A line that MIXES a
+- A `user` line marked `isMeta` (command output, injected notes) or
+  `isCompactSummary` (the model's summary of the conversation it is in) is not
+  indexed: both return the same words twice to one search.
+- A block that is wholly injected — a system reminder, Codex's environment
+  context or its instructions — is dropped. A line that MIXES a
   person's words with injected text keeps both: nothing in the format separates
   them, and that limit is written down rather than implied.
-- Codex is the same rule against its own shape, including archived
-  conversations compressed as `.jsonl.zst`.
+- **Codex has its own rule**, written against the shapes agent-seat confirmed
+  for 0.166.0 (hub #16853): only a `response_item` whose payload is a
+  `message`, the conversation id from the file's `session_meta`, the turn id
+  from the line's ordinal. `developer` messages are never turns and a
+  `partial_answer` is superseded by the final one. **`role: user` is not
+  evidence of a person**: Codex puts its AGENTS.md instructions and
+  environment context in user messages too, so a user message is indexed as
+  somebody's words only when the content kinds say `user.text` — and when that
+  field is absent it is refused AND counted, because a wrong attribution is
+  worse than a missing passage.
+- Archived conversations compressed as `.jsonl.zst` are read. A compressed
+  copy beside the original is **one** conversation, not two, and a conversation
+  moved to `archived_sessions/` is a move rather than one that vanished.
 
 **One passage per turn**, never spanning two, so a result is attributable to
 one speaker. New payload fields for dprox: `agent`, `runtime`,
 `conversation_id`, `turn_id`, `role`, `turn_time`, `sidechain`.
+
+**A turn still being written is not read yet.** A line without a trailing
+newline is a line the runtime has not finished, so the read position stops
+before it and the turn is indexed once, when it is whole. A bad line in the
+middle of a file is counted and read past — it was never going to be finished.
+
+**A long turn is chunked within itself**, never across two, so every passage
+carries one speaker. A pasted document in a turn would otherwise go to the
+embedder whole, and be truncated or refused.
 
 ### A live conversation is read from where the last run stopped
 

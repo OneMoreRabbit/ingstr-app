@@ -114,6 +114,11 @@ CREATE TABLE IF NOT EXISTS conversation_reads (
     -- a different group must move its passages, or the old audience keeps
     -- reading them.
     classification_group TEXT NOT NULL,
+    -- The runtime's own id for the conversation. Kept so a conversation that
+    -- MOVED — Codex archives by moving a file, and may compress it — is
+    -- recognised as the same conversation at a new path rather than reported
+    -- as one that vanished.
+    conversation_id TEXT NOT NULL DEFAULT '',
     last_read_at TEXT NOT NULL
 );
 
@@ -151,6 +156,7 @@ class ConversationRead:
     last_line: int
     size_bytes: int
     classification_group: str
+    conversation_id: str = ""
 
 
 @dataclass(frozen=True)
@@ -513,7 +519,7 @@ class StateDB:
         with self._cursor() as cur:
             row = cur.execute(
                 """
-                SELECT last_line, size_bytes, classification_group
+                SELECT last_line, size_bytes, classification_group, conversation_id
                 FROM conversation_reads WHERE source_path = ?
                 """,
                 (source_path,),
@@ -524,6 +530,7 @@ class StateDB:
             last_line=row["last_line"],
             size_bytes=row["size_bytes"],
             classification_group=row["classification_group"],
+            conversation_id=row["conversation_id"],
         )
 
     def record_read_position(
@@ -534,6 +541,7 @@ class StateDB:
         size_bytes: int,
         turn_count: int,
         classification_group: str,
+        conversation_id: str,
         at: str,
     ) -> None:
         """Where this conversation has been read to.
@@ -547,16 +555,25 @@ class StateDB:
                 """
                 INSERT INTO conversation_reads
                     (source_path, last_line, size_bytes, turn_count,
-                     classification_group, last_read_at)
-                VALUES (?, ?, ?, ?, ?, ?)
+                     classification_group, conversation_id, last_read_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(source_path) DO UPDATE SET
                     last_line            = excluded.last_line,
                     size_bytes           = excluded.size_bytes,
                     turn_count           = conversation_reads.turn_count + excluded.turn_count,
                     classification_group = excluded.classification_group,
+                    conversation_id      = excluded.conversation_id,
                     last_read_at         = excluded.last_read_at
                 """,
-                (source_path, last_line, size_bytes, turn_count, classification_group, at),
+                (
+                    source_path,
+                    last_line,
+                    size_bytes,
+                    turn_count,
+                    classification_group,
+                    conversation_id,
+                    at,
+                ),
             )
 
     def record_conversation_fault(

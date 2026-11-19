@@ -11,7 +11,9 @@ import structlog
 from . import __version__
 from .agent_folders import (
     AgentFolderSummary,
+    chunks_for_turn,
     conversation_fault,
+    indexable_as_a_document,
     is_conversation,
     read_agent_folders,
     turn_text_is_indexable,
@@ -849,6 +851,9 @@ def run_agent_folders(
     for folder in folders:
         directory = cfg.agent_source.root / folder.path
         seen_here: set[str] = set()
+        #: conversation id -> where it was found this run, so a conversation
+        #: that MOVED is recognised rather than reported as one that vanished.
+        conversations_seen: dict[str, str] = {}
         for path in iter_source_files(
             directory, cfg.source.follow_symlinks, cfg.source.exclude_patterns
         ):
@@ -869,7 +874,17 @@ def run_agent_folders(
                     now_iso=now_iso,
                     folder_summary=folder_summary,
                     summary=summary,
+                    conversations_seen=conversations_seen,
                 )
+                continue
+            if not indexable_as_a_document(folder, path):
+                # A `sessions` folder holds more than conversations: Claude
+                # Code writes large tool output to files beside a session.
+                # Indexing those as documents would put tool output in the
+                # index, which D14 says it must not. Counted, so "the folder
+                # holds things we do not index" is visible rather than
+                # inferred.
+                folder_summary.files_skipped += 1
                 continue
             # A memory note or a file in `scratch` is an ordinary document;
             # only its group comes from somewhere else.
@@ -909,6 +924,7 @@ def run_agent_folders(
         _note_vanished_conversations(
             directory,
             seen_here=seen_here,
+            conversations_seen=conversations_seen,
             state=state,
             dry_run=dry_run,
             now_iso=now_iso,
@@ -930,6 +946,7 @@ def _index_conversation(
     now_iso: str,
     folder_summary: AgentFolderSummary,
     summary: RunSummary,
+    conversations_seen: dict[str, str],
 ) -> None:
     """Read one conversation from where the last run stopped, and index the
     turns after it."""
@@ -965,6 +982,20 @@ def _index_conversation(
         return
 
     folder_summary.conversations_read += 1
+    this_id = read.turns[0].conversation_id if read.turns else (
+        known.conversation_id if known else ""
+    )
+    if this_id:
+        # Maintenance compresses a conversation, and the compressed copy can
+        # sit beside the original. It is ONE conversation in two files, never
+        # two (agent-seat, hub #16853). Reading both would write the same
+        # passages twice and keep two read positions for one thing.
+        already = conversations_seen.get(this_id)
+        if already is not None and already != abs_path:
+            folder_summary.conversations_duplicate_copy += 1
+            _log.info("conversation_second_copy")
+            return
+        conversations_seen[this_id] = abs_path
 
     # The declaration decides who may read these passages, so a changed
     # declaration has to move the ones already written. Nothing else would:
@@ -990,10 +1021,13 @@ def _index_conversation(
             count=read.unrecognised,
         )
 
-    indexable = [
-        turn for turn in read.turns
-        if turn_text_is_indexable(turn.text, folder_summary)
-    ]
+    indexable: list[tuple[Turn, Chunk]] = []
+    for turn in read.turns:
+        if not turn_text_is_indexable(turn.text, folder_summary):
+            continue
+        indexable.extend(
+            (turn, chunk) for chunk in chunks_for_turn(turn.text, cfg.chunking)
+        )
     if not indexable:
         if not dry_run:
             state.record_read_position(
@@ -1002,15 +1036,17 @@ def _index_conversation(
                 size_bytes=path.stat().st_size,
                 turn_count=0,
                 classification_group=folder.group,
+                conversation_id=known.conversation_id if known else "",
                 at=now_iso,
             )
             state.clear_conversation_fault(abs_path)
         return
 
-    vectors = embedder.embed([turn.text for turn in indexable])
+    vectors = embedder.embed([chunk.text for _, chunk in indexable])
     points = [
         _build_turn_point(
             turn=turn,
+            chunk=chunk,
             vector=vector,
             org=cfg.org,
             agent=folder,
@@ -1020,10 +1056,10 @@ def _index_conversation(
             else path.name,
             indexed_at=now_iso,
         )
-        for turn, vector in zip(indexable, vectors, strict=True)
+        for (turn, chunk), vector in zip(indexable, vectors, strict=True)
     ]
 
-    folder_summary.turns_indexed += len(points)
+    folder_summary.turns_indexed += len({turn.turn_id for turn, _ in indexable})
     folder_summary.chunks_written += len(points)
     summary.chunks_written += len(points)
     summary.files_indexed += 1
@@ -1035,9 +1071,13 @@ def _index_conversation(
     state.record_read_position(
         abs_path,
         last_line=read.last_line,
+        # The size as of the lines actually read. Recording the file's size
+        # after an incomplete tail would make the next run's "shorter than we
+        # read" test compare against bytes nobody read.
         size_bytes=path.stat().st_size,
         turn_count=len(points),
         classification_group=folder.group,
+        conversation_id=indexable[0][0].conversation_id,
         at=now_iso,
     )
     state.clear_conversation_fault(abs_path)
@@ -1046,6 +1086,7 @@ def _index_conversation(
 def _build_turn_point(
     *,
     turn: Turn,
+    chunk: Chunk,
     vector: list[float],
     org: str,
     agent: AgentFolder,
@@ -1062,14 +1103,14 @@ def _build_turn_point(
     point_id = str(
         uuid.uuid5(
             _POINT_NAMESPACE,
-            f"{org}:conversation:{turn.conversation_id}:{turn.turn_id}",
+            f"{org}:conversation:{turn.conversation_id}:{turn.turn_id}:{chunk.index}",
         )
     )
     return QdrantPoint(
         id=point_id,
         vector=vector,
         payload={
-            "text": turn.text,
+            "text": chunk.text,
             "source_path": source_path,
             "source_path_rel": source_path_rel,
             "classification_group": agent.group,
@@ -1082,8 +1123,8 @@ def _build_turn_point(
             "role": turn.role,
             "turn_time": turn.turn_time,
             "sidechain": turn.sidechain,
-            "chunk_index": 0,
-            "chunk_total": 1,
+            "chunk_index": chunk.index,
+            "chunk_total": chunk.total,
         },
     )
 
@@ -1106,6 +1147,7 @@ def _note_vanished_conversations(
     directory: Path,
     *,
     seen_here: set[str],
+    conversations_seen: dict[str, str],
     state: StateDB,
     dry_run: bool,
     now_iso: str,
@@ -1116,13 +1158,33 @@ def _note_vanished_conversations(
     Not a removal, in any run, including `--full`: conversations are kept for
     ever, so a missing one is the export, the host or the retention setting.
     The passages stay and the run keeps saying so until the file is back.
+
+    **Unless it moved.** Codex archives a conversation by moving it from
+    `sessions/` to `archived_sessions/`, and may compress it on the way. That
+    is a normal action, so reporting a fault for it would mean every seat
+    raising one every time a conversation ended — and a warning that fires on
+    ordinary work is one nobody reads. A conversation whose id has been seen
+    at another path this run has moved: the old row is forgotten, and the
+    passages need no deletion because their ids are built from the
+    conversation and the turn, so the new path rewrites exactly the same ones.
     """
     known = state.conversation_paths_under(str(directory))
     for missing in sorted(known - seen_here):
+        position = state.read_position(missing)
+        moved_to = (
+            conversations_seen.get(position.conversation_id)
+            if position and position.conversation_id
+            else None
+        )
+        if moved_to is not None:
+            folder_summary.conversations_moved += 1
+            _log.info("conversation_moved")
+            if not dry_run:
+                state.forget_conversation(missing)
+            continue
         folder_summary.conversations_gone += 1
         _log.error("conversation_gone", folder=str(directory.name))
         if not dry_run:
-            position = state.read_position(missing)
             state.record_conversation_fault(
                 missing,
                 kind="gone",

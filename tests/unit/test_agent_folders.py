@@ -417,3 +417,135 @@ def test_a_memory_note_is_not_orphaned_by_a_full_run(tmp_path, run):
     # that the note was SEEN.
     assert summary.purge_refused_reason is None
     assert summary.passages_removed_gone == 0
+
+
+# ── arch's review of 17da17d (hub #16843) ──────────────────────────────────
+
+
+def test_a_long_turn_becomes_several_passages(tmp_path, run):
+    """Otherwise a pasted document goes to the embedder whole, and is
+    truncated or refused."""
+    long_answer = "\n".join(f"paragraph {i} of a long answer" for i in range(300))
+    mount, _ = _mount_with_conversation(
+        tmp_path, [_turn("t1", long_answer, role="assistant")]
+    )
+    _, qdrant, embedder = run(mount, _plan(_folder()))
+
+    points = qdrant.upsert_points.call_args.args[0]
+    assert len(points) > 1
+    assert {p.payload["turn_id"] for p in points} == {"t1"}
+    assert [p.payload["chunk_index"] for p in points] == list(range(len(points)))
+    assert len({p.id for p in points}) == len(points)
+    assert all(len(text) <= 2000 for text in embedder.embed.call_args.args[0])
+
+
+def test_a_conversation_moved_to_archived_sessions_is_not_a_fault(tmp_path, run):
+    """Codex archives by MOVING a file. A fault on every archived conversation
+    is a warning that fires on ordinary work, which is one nobody reads."""
+    mount, conversation = _mount_with_conversation(tmp_path, [_turn("t1", "first")])
+    state = StateDB(tmp_path / "state.db")
+    try:
+        run(mount, _plan(_folder()), state=state)
+        archived = conversation.parent / "archived" / conversation.name
+        archived.parent.mkdir()
+        conversation.rename(archived)
+        summary, qdrant, _ = run(mount, _plan(_folder()), state=state, full=True)
+        faults = state.outstanding_conversation_faults()
+    finally:
+        state.close()
+
+    assert summary.agent_folders.conversations_moved == 1
+    assert summary.agent_folders.conversations_gone == 0
+    assert faults == {}
+    qdrant.delete_points_by_source_path.assert_not_called()
+
+
+def test_a_moved_conversation_keeps_its_passage_ids(tmp_path, run):
+    """Which is why a move needs no deletion: the id is built from the
+    conversation and the turn, so the new path rewrites the same points."""
+    mount, conversation = _mount_with_conversation(tmp_path, [_turn("t1", "first")])
+    state = StateDB(tmp_path / "state.db")
+    try:
+        _, before, _ = run(mount, _plan(_folder()), state=state)
+        archived = conversation.parent / "archived" / conversation.name
+        archived.parent.mkdir()
+        conversation.rename(archived)
+        _, after, _ = run(mount, _plan(_folder()), state=state, full=True)
+    finally:
+        state.close()
+
+    assert [p.id for p in before.upsert_points.call_args.args[0]] == [
+        p.id for p in after.upsert_points.call_args.args[0]
+    ]
+
+
+def test_only_conversations_and_memory_notes_are_indexed_from_sessions(tmp_path, run):
+    """Claude Code writes large tool output to files beside a session.
+
+    Indexed as documents those would put tool output into search, which D14
+    says must not happen.
+    """
+    mount, conversation = _mount_with_conversation(tmp_path, [_turn("t1", "first")])
+    beside = conversation.parent / "tool-output-5f2a.txt"
+    beside.write_text("the entire contents of a file the agent read")
+    note = conversation.parent / "memory" / "what-i-learned.md"
+    note.parent.mkdir()
+    note.write_text("# Note\n\nThe lock sits beside the state database.\n")
+
+    summary, qdrant, _ = run(mount, _plan(_folder()))
+
+    assert summary.agent_folders.files_skipped == 1
+    assert summary.agent_folders.documents_indexed == 1
+    texts = " ".join(
+        p.payload["text"]
+        for call in qdrant.upsert_points.call_args_list
+        for p in call.args[0]
+    )
+    assert "entire contents" not in texts
+    assert "lock sits beside" in texts
+
+
+def _codex_conversation(folder: Path, name: str, *, compressed: bool) -> Path:
+    """One Codex conversation, written by hand, optionally compressed."""
+    import zstandard
+
+    lines = [
+        {"type": "session_meta", "payload": {"id": "codex-conv-9"}},
+        {
+            "type": "response_item",
+            "ordinal": 1,
+            "timestamp": "2026-11-19T11:00:00Z",
+            "payload": {
+                "type": "message",
+                "role": "assistant",
+                "phase": "final_answer",
+                "content": [{"type": "output_text", "text": "the mount is read-only"}],
+            },
+        },
+    ]
+    raw = "".join(json.dumps(line) + "\n" for line in lines)
+    path = folder / name
+    if compressed:
+        path.write_bytes(zstandard.ZstdCompressor().compress(raw.encode()))
+    else:
+        path.write_text(raw)
+    return path
+
+
+def test_a_compressed_copy_beside_the_original_is_one_conversation(tmp_path, run):
+    """Maintenance compresses a conversation and the copy can sit beside it.
+
+    Read as two, it would write the same passages twice and keep two read
+    positions for one thing.
+    """
+    mount, conversation = _mount_with_conversation(tmp_path, [_turn("t1", "first")])
+    conversation.unlink()
+    folder = conversation.parent
+    _codex_conversation(folder, "rollout.jsonl", compressed=False)
+    _codex_conversation(folder, "rollout.jsonl.zst", compressed=True)
+
+    summary, qdrant, _ = run(mount, _plan(_folder()))
+
+    assert summary.agent_folders.conversations_duplicate_copy == 1
+    points = [p for call in qdrant.upsert_points.call_args_list for p in call.args[0]]
+    assert len(points) == 1
