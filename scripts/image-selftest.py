@@ -58,6 +58,41 @@ def _fail(message: str) -> None:
     raise SystemExit(1)
 
 
+SELFTEST_TEXT = "self-test"
+
+
+def archived_conversation_bytes() -> bytes:
+    """One archived Codex conversation, compressed, in the shapes Codex writes.
+
+    `tests/unit/test_image_selftest_fixture.py` reads this same function, so a
+    change to the conversation rule breaks a test rather than a build. It broke
+    a build once: the fixture was written inline here, the reader was later
+    tightened to require the line type, and nothing noticed until the image
+    would not build — after the tag had been pushed.
+    """
+    import json
+
+    import zstandard
+
+    rows = (
+        # The conversation id lives in the first line, not on each item
+        # (agent-seat, hub #16853).
+        {"type": "session_meta", "payload": {"id": "selftest"}},
+        {
+            "type": "response_item",
+            "ordinal": 1,
+            "payload": {
+                "type": "message",
+                "role": "assistant",
+                "phase": "final_answer",
+                "content": [{"type": "output_text", "text": SELFTEST_TEXT}],
+            },
+        },
+    )
+    raw = "".join(json.dumps(row) + "\n" for row in rows).encode()
+    return bytes(zstandard.ZstdCompressor().compress(raw))
+
+
 def main() -> int:
     # 1. The environment the image promises the dropped user.
     for var in ("HOME", "XDG_CACHE_HOME", "NUMBA_CACHE_DIR"):
@@ -120,31 +155,16 @@ def main() -> int:
     #    failure if it were missing would be one archived conversation per
     #    seat going silently unindexed, which is exactly the shape of failure
     #    this self-test exists to catch at build time rather than at 03:00.
-    import json
-
-    import zstandard
-
     from ingstr.conversations import read_conversation
 
     with tempfile.TemporaryDirectory(dir="/tmp/ingstr-selftest") as tmp:
-        line = {
-            "id": "item-1",
-            "conversation_id": "selftest",
-            "payload": {
-                "type": "message",
-                "role": "assistant",
-                "content": [{"type": "output_text", "text": "self-test"}],
-            },
-        }
         archived = Path(tmp) / "rollout.jsonl.zst"
-        archived.write_bytes(
-            zstandard.ZstdCompressor().compress((json.dumps(line) + "\n").encode())
-        )
+        archived.write_bytes(archived_conversation_bytes())
         try:
             read = read_conversation(archived)
         except Exception as e:  # noqa: BLE001 — the build needs the reason
             _fail(f"reading a .jsonl.zst conversation raised {type(e).__name__}: {e}")
-        if [t.text for t in read.turns] != ["self-test"]:
+        if [t.text for t in read.turns] != [SELFTEST_TEXT]:
             _fail("a compressed conversation yielded no turns")
 
     print(

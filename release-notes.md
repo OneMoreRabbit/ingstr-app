@@ -12,7 +12,27 @@ Newest first. One entry per release tag, written in the same commit that cuts th
 tag. Plain English: a reader skimming this page should know what changed and
 whether they have to act.
 
-## v0.2.4 — 2026-11-19
+## v0.2.5 — 2026-11-19
+
+**TL;DR:** v0.2.4 is tagged and **has no image**: its build failed on the
+image self-test, and the self-test was right. v0.2.5 is v0.2.4 with the fault
+fixed. **Run v0.2.5; v0.2.4 cannot be pulled.**
+
+**What failed.** The self-test built its own Codex conversation inline, and
+when the Codex rule was tightened to require the line type (`response_item`)
+that fixture went stale. The reader was correct; the fixture was not. Nothing
+noticed until the image would not build — after the tag had been pushed.
+
+**What changed.** The fixture lives in one function and a unit test reads that
+same function, so tightening the rule again breaks a test in a second rather
+than a build on a release day. Nothing else differs from v0.2.4.
+
+**A build-time check that can go stale is worse than no check:** it passes for
+months and fails on the day of a release. This one caught a real fault at the
+right moment and the lesson is where the fixture lives, not whether to have
+the check.
+
+## v0.2.4 — 2026-11-19 — TAGGED, NO IMAGE
 
 **TL;DR:** an org may now have a **second source** — the agents' and seats' own
 `sessions`, `memory` and `scratch`, read through beaver's mount and classified
