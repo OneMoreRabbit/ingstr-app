@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "ingstr"
-version = "0.2.3"
+version = "0.2.4"
 description = "Document ingestion pipeline that walks a filesystem tree, parses + chunks documents, embeds via Ollama, and upserts into Qdrant with RBAC classification metadata."
 readme = "README.md"
 requires-python = ">=3.11"
@@ -49,6 +49,11 @@ dependencies = [
     # in one place rather than hidden in the Dockerfile. Their models / data
     # files are pre-downloaded in the Dockerfile builder stage so the
     # privilege-dropped runtime never tries to write into /opt/venv.
+    # Codex archives a conversation as `.jsonl.zst`. Python 3.12 has no zstd
+    # in the standard library (3.14 adds `compression.zstd`), and the image
+    # carries no `zstd` binary — so the reader needs this. Small, wheels for
+    # every platform we build.
+    "zstandard>=0.22,<1.0",
     "spacy>=3.7,<4",
     "nltk>=3.8,<4",
     "httpx>=0.27,<1.0",

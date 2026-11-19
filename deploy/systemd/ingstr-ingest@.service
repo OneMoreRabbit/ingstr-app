@@ -38,11 +38,12 @@ WorkingDirectory=/home/otter/docker/ingstr/%i
 #
 # DO NOT USE Conflicts= BETWEEN THE TWO UNITS. Conflicts= STOPS the other
 # unit rather than refusing the new one, so the unit that starts second kills
-# the one already running. On otter the one nightly full run due since the
-# restore was stopped a second after it started, and it would have been every
-# night after it, with nothing saying so. From v0.2.3 ingstr refuses for
-# itself, but a unit-level lock is still worth having so no pointless
-# container is started.
+# the one already running. On otter, on 2026-11-14, that was the nightly full
+# run, stopped a second after it started with nothing saying so. On the nights
+# after it the two did not collide and the full run finished — which is the
+# worst shape for a fault, since nothing says which kind of night it was. From
+# v0.2.3 ingstr refuses for itself, but a unit-level lock is still worth having
+# so no pointless container is started.
 #
 # AND NO --expect-removals, EVER, IN A UNIT. That flag lets a run remove more
 # passages than the guard would allow, and it exists to be typed by hand, for

@@ -115,7 +115,42 @@ def main() -> int:
             "the cache is not being used, so the next image may fail the same way"
         )
 
-    print(f"image self-test OK: PDF parsed as uid {os.getuid()}, HOME={os.environ['HOME']}")
+    # 6. A compressed Codex conversation is read through the same reader the
+    #    run uses. The dependency is small and easy to drop from a build; the
+    #    failure if it were missing would be one archived conversation per
+    #    seat going silently unindexed, which is exactly the shape of failure
+    #    this self-test exists to catch at build time rather than at 03:00.
+    import json
+
+    import zstandard
+
+    from ingstr.conversations import read_conversation
+
+    with tempfile.TemporaryDirectory(dir="/tmp/ingstr-selftest") as tmp:
+        line = {
+            "id": "item-1",
+            "conversation_id": "selftest",
+            "payload": {
+                "type": "message",
+                "role": "assistant",
+                "content": [{"type": "output_text", "text": "self-test"}],
+            },
+        }
+        archived = Path(tmp) / "rollout.jsonl.zst"
+        archived.write_bytes(
+            zstandard.ZstdCompressor().compress((json.dumps(line) + "\n").encode())
+        )
+        try:
+            read = read_conversation(archived)
+        except Exception as e:  # noqa: BLE001 — the build needs the reason
+            _fail(f"reading a .jsonl.zst conversation raised {type(e).__name__}: {e}")
+        if [t.text for t in read.turns] != ["self-test"]:
+            _fail("a compressed conversation yielded no turns")
+
+    print(
+        f"image self-test OK: PDF parsed as uid {os.getuid()}, "
+        f"HOME={os.environ['HOME']}, compressed conversation read"
+    )
     return 0
 
 

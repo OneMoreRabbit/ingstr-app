@@ -93,6 +93,47 @@ CREATE TABLE IF NOT EXISTS run_removals (
     gone_count         INTEGER,
     lost_access_count  INTEGER
 );
+
+-- How far each conversation file has been read (ingstr-deploy 0.8).
+--
+-- A conversation is append-only and lives for as long as the work does, so a
+-- run that re-read it whole would re-embed every passage in a 12 MB file
+-- because one turn was added — every five minutes, on every live
+-- conversation. The line count is what makes an append an insert.
+--
+-- A NEW TABLE, not columns on `files`, for the reason v0.2.1's state was: an
+-- older image builds its record with `SELECT * FROM files`, so a column added
+-- there breaks a rollback, while a table it has never heard of is never read.
+CREATE TABLE IF NOT EXISTS conversation_reads (
+    source_path  TEXT PRIMARY KEY,
+    last_line    INTEGER NOT NULL,
+    size_bytes   INTEGER NOT NULL,
+    turn_count   INTEGER NOT NULL,
+    -- The group the passages of this conversation currently carry. Kept so a
+    -- changed declaration can be followed: the plan giving an agent's folder
+    -- a different group must move its passages, or the old audience keeps
+    -- reading them.
+    classification_group TEXT NOT NULL,
+    -- The runtime's own id for the conversation. Kept so a conversation that
+    -- MOVED — Codex archives by moving a file, and may compress it — is
+    -- recognised as the same conversation at a new path rather than reported
+    -- as one that vanished.
+    conversation_id TEXT NOT NULL DEFAULT '',
+    last_read_at TEXT NOT NULL
+);
+
+-- Conversation files that are gone, or shorter than we have already read.
+--
+-- Conversations are kept for ever (agent-folders-design D4), so this is never
+-- a deletion to follow: it is the export, the host, or the retention setting.
+-- The passages stay and the run keeps exiting 3 until the row is cleared by
+-- the file coming back, or by its declaration going away.
+CREATE TABLE IF NOT EXISTS conversation_faults (
+    source_path TEXT PRIMARY KEY,
+    kind        TEXT NOT NULL,          -- 'gone' | 'shrunk'
+    known_line  INTEGER NOT NULL,
+    noticed_at  TEXT NOT NULL
+);
 """
 
 
@@ -106,6 +147,16 @@ def _like_prefix(prefix: str) -> str:
     """
     escaped = prefix.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
     return f"{escaped}%"
+
+
+@dataclass(frozen=True)
+class ConversationRead:
+    """How far a conversation has been read, and under which group."""
+
+    last_line: int
+    size_bytes: int
+    classification_group: str
+    conversation_id: str = ""
 
 
 @dataclass(frozen=True)
@@ -460,3 +511,134 @@ class StateDB:
                     """,
                     (str(run_id), purge_refused_reason, gone_count, lost_access_count),
                 )
+
+    # ── conversations: where each file has been read to, and what is wrong ──
+
+    def read_position(self, source_path: str) -> ConversationRead | None:
+        """Where a conversation was read to, and under which group."""
+        with self._cursor() as cur:
+            row = cur.execute(
+                """
+                SELECT last_line, size_bytes, classification_group, conversation_id
+                FROM conversation_reads WHERE source_path = ?
+                """,
+                (source_path,),
+            ).fetchone()
+        if row is None:
+            return None
+        return ConversationRead(
+            last_line=row["last_line"],
+            size_bytes=row["size_bytes"],
+            classification_group=row["classification_group"],
+            conversation_id=row["conversation_id"],
+        )
+
+    def record_read_position(
+        self,
+        source_path: str,
+        *,
+        last_line: int,
+        size_bytes: int,
+        turn_count: int,
+        classification_group: str,
+        conversation_id: str,
+        at: str,
+    ) -> None:
+        """Where this conversation has been read to.
+
+        `at` is passed in rather than read from a clock here, as every other
+        timestamp in this module is: one run writes one time, and a test can
+        say what it is.
+        """
+        with self._cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO conversation_reads
+                    (source_path, last_line, size_bytes, turn_count,
+                     classification_group, conversation_id, last_read_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(source_path) DO UPDATE SET
+                    last_line            = excluded.last_line,
+                    size_bytes           = excluded.size_bytes,
+                    turn_count           = conversation_reads.turn_count + excluded.turn_count,
+                    classification_group = excluded.classification_group,
+                    conversation_id      = excluded.conversation_id,
+                    last_read_at         = excluded.last_read_at
+                """,
+                (
+                    source_path,
+                    last_line,
+                    size_bytes,
+                    turn_count,
+                    classification_group,
+                    conversation_id,
+                    at,
+                ),
+            )
+
+    def record_conversation_fault(
+        self, source_path: str, *, kind: str, known_line: int, at: str
+    ) -> None:
+        """A conversation that is gone or shorter than we have read.
+
+        Never a removal: conversations are kept for ever, so this is the
+        export, the host or the retention setting (agent-folders-design D4).
+        """
+        with self._cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO conversation_faults (source_path, kind, known_line, noticed_at)
+                VALUES (?, ?, ?, ?)
+                ON CONFLICT(source_path) DO UPDATE SET
+                    kind       = excluded.kind,
+                    known_line = excluded.known_line
+                """,
+                (source_path, kind, known_line, at),
+            )
+
+    def clear_conversation_fault(self, source_path: str) -> None:
+        """The file is readable again, or its declaration has gone away."""
+        with self._cursor() as cur:
+            cur.execute(
+                "DELETE FROM conversation_faults WHERE source_path = ?", (source_path,)
+            )
+
+    def outstanding_conversation_faults(self) -> dict[str, int]:
+        """How many conversations are gone and how many have shrunk.
+
+        Counts only: a path here is org data and the journal is on the host.
+        """
+        with self._cursor() as cur:
+            rows = cur.execute(
+                "SELECT kind, COUNT(*) AS n FROM conversation_faults GROUP BY kind"
+            ).fetchall()
+        return {row["kind"]: row["n"] for row in rows}
+
+    def all_conversation_paths(self) -> set[str]:
+        """Every conversation this org has indexed, declared or not.
+
+        Used by the removal step to find conversations whose folder the plan
+        no longer declares — the one removal an agent folder has.
+        """
+        with self._cursor() as cur:
+            rows = cur.execute("SELECT source_path FROM conversation_reads").fetchall()
+        return {row["source_path"] for row in rows}
+
+    def forget_conversation(self, source_path: str) -> None:
+        """Drop a conversation's read position and any fault against it."""
+        with self._cursor() as cur:
+            cur.execute(
+                "DELETE FROM conversation_reads WHERE source_path = ?", (source_path,)
+            )
+            cur.execute(
+                "DELETE FROM conversation_faults WHERE source_path = ?", (source_path,)
+            )
+
+    def conversation_paths_under(self, path_prefix: str) -> set[str]:
+        """Known conversation files beneath a prefix, for finding the vanished."""
+        with self._cursor() as cur:
+            rows = cur.execute(
+                "SELECT source_path FROM conversation_reads WHERE source_path LIKE ? ESCAPE '\\'",
+                (_like_prefix(path_prefix),),
+            ).fetchall()
+        return {row["source_path"] for row in rows}

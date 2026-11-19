@@ -80,14 +80,32 @@ orgs:
     state:
       db_path: /var/lib/ingstr/state.db
 
-    # ── Agent surfaces (ADR-0010 §7) ─────────────────────────────────
-    # Optional. `root` has no default on purpose: a wrong-but-plausible
-    # mount root resolves to a real place on the wrong machine and
-    # succeeds. Leave the whole section out when not reading agent data.
+    # ── Refusing an implausible removal (ADR-0010 §6 layer 3) ────────
+    # Refuse a removal that would take more than this share of what this
+    # org knows. Default 0.5. It governs EVERYTHING this org indexes,
+    # which is why it is declared here; it lived inside `agent_source`
+    # until ingstr-deploy 0.8, where an org without agent folders could
+    # not set it at all.
+    # purge_threshold: 0.5
+
+    # ── The agents' own folders (ingstr-deploy 0.8) ──────────────────
+    # Optional: leave the section out and this org indexes only its own
+    # files. Present, and it reads the agents' conversations and notes
+    # through beaver's mount — classified by the group the RBAC PLAN
+    # declares, never by the files' own group, because a seat's files
+    # belong to its home user.
+    #
+    # `root` is the mount root for EVERY host and carries NO host
+    # segment: the plan writes `<host>/` as the first part of each
+    # declared path. It has no default, because a wrong-but-plausible
+    # root resolves to a real place and succeeds.
+    #
+    # Which folders are read is NOT configured here. The plan's
+    # `agent_folders[]` section declares them, with the group for each
+    # and whether it is indexed (`compiled-rbac-plan` 0.12). Without
+    # that section, a run with this block configured stops and says so.
     # agent_source:
-    #   root: /mnt/agent-hosts/otter
-    #   purge_threshold: 0.5
-    #   surfaces: [memory, sessions, scratch]
+    #   root: /mnt/agent-hosts
 
   # A second org is another entry, with its own folder, collection and
   # state database. It is NOT a second deployment.

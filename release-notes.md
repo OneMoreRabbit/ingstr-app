@@ -1,7 +1,7 @@
 ---
 title: Release notes — ingstr-app
 status: active
-updated: 2026-11-12
+updated: 2026-11-19
 owner: agent-eco.component.ingstr
 about: one short entry per release, newest first — what changed and what anyone must do about it
 ---
@@ -11,6 +11,102 @@ about: one short entry per release, newest first — what changed and what anyon
 Newest first. One entry per release tag, written in the same commit that cuts the
 tag. Plain English: a reader skimming this page should know what changed and
 whether they have to act.
+
+## v0.2.4 — 2026-11-19
+
+**TL;DR:** an org may now have a **second source** — the agents' and seats' own
+`sessions`, `memory` and `scratch`, read through beaver's mount and classified
+by the group the RBAC plan declares. Three things a deployment must do before
+it can be used, each of which stops the run with a message naming the fix.
+
+### What is indexed from a conversation
+
+Only the words: what the person and the agent said. Measured on a real Claude
+Code conversation (7,293 lines, 12 MB): tool calls and their output are 70% of
+the content, the agent's thinking 20%, and the words about 10%.
+
+- `user` and `assistant` lines, `text` blocks and plain-string user messages.
+- **Never** `tool_use` or `tool_result`, and never a `user` line carrying
+  `toolUseResult` — Claude Code records tool output as a user line, so without
+  that check two thirds of what looks like a person talking is machine output,
+  including the contents of files indexed elsewhere under their own group.
+- **Never `thinking`** (arch, 2026-11-19): drafting rather than what was said,
+  and the group would be reading an agent's private reasoning.
+- Sub-agent turns are indexed, flagged `sidechain` in the payload.
+- A `user` line marked `isMeta` (command output, injected notes) or
+  `isCompactSummary` (the model's summary of the conversation it is in) is not
+  indexed: both return the same words twice to one search.
+- A block that is wholly injected — a system reminder, Codex's environment
+  context or its instructions — is dropped. A line that MIXES a
+  person's words with injected text keeps both: nothing in the format separates
+  them, and that limit is written down rather than implied.
+- **Codex has its own rule**, written against the shapes agent-seat confirmed
+  for 0.166.0 (hub #16853): only a `response_item` whose payload is a
+  `message`, the conversation id from the file's `session_meta`, the turn id
+  from the line's ordinal. `developer` messages are never turns and a
+  `partial_answer` is superseded by the final one. **`role: user` is not
+  evidence of a person**: Codex puts its AGENTS.md instructions and
+  environment context in user messages too, so a user message is indexed as
+  somebody's words only when the content kinds say `user.text` — and when that
+  field is absent it is refused AND counted, because a wrong attribution is
+  worse than a missing passage.
+- Archived conversations compressed as `.jsonl.zst` are read. A compressed
+  copy beside the original is **one** conversation, not two, and a conversation
+  moved to `archived_sessions/` is a move rather than one that vanished.
+
+**One passage per turn**, never spanning two, so a result is attributable to
+one speaker. New payload fields for dprox: `agent`, `runtime`,
+`conversation_id`, `turn_id`, `role`, `turn_time`, `sidechain`.
+
+**A turn still being written is not read yet.** A line without a trailing
+newline is a line the runtime has not finished, so the read position stops
+before it and the turn is indexed once, when it is whole. A bad line in the
+middle of a file is counted and read past — it was never going to be finished.
+
+**A long turn is chunked within itself**, never across two, so every passage
+carries one speaker. A pasted document in a turn would otherwise go to the
+embedder whole, and be truncated or refused.
+
+### A live conversation is read from where the last run stopped
+
+A conversation is append-only and grows for as long as the work does. ingstr
+skips by whole-file hash, so without this one new turn would re-parse a 12 MB
+file and re-embed every passage in it — every five minutes, on every live
+conversation. The read position is kept per file and the passage id is built
+from the conversation and turn ids, so an append is a pure insert and a re-read
+writes exactly the ids it wrote before. The positions live in a new table, so
+an older image still opens the state database.
+
+### A vanished or shrunk conversation is a fault, not a removal
+
+Conversations are kept for ever, so a conversation that is gone — or shorter
+than ingstr has already read — means the export, the host or the retention
+setting. **The passages stay**, the run exits 3, and it keeps saying so until
+the file is back. The one removal an agent folder has is the declaration
+changing: a folder the plan stops declaring loses its passages, as access
+withdrawn always does.
+
+### No secrets in the index
+
+A passage that looks like a credential is not indexed — the passage, not the
+file, so one leaked token does not hide a conversation. The patterns are part
+of the release and cannot be tuned by a deployment: two orgs that could tune
+them would hold two different indexes. The run reports how many passages were
+withheld, never the value and never the path. It is a net, not a guarantee.
+
+### What a deployment must change
+
+1. **`compiled-rbac-plan` 0.12** wherever agent folders are configured. Its
+   `agent_folders[]` section is what says which folders exist and which group
+   classifies each one; without it the run exits 1.
+2. **`agent_source.root` is now `/mnt/agent-hosts` with no host segment**, and
+   **`agent_source.surfaces` is refused**: the plan declares the folders now.
+3. **`purge_threshold` moves from `agent_source` to the org.** It governs the
+   removal guard for everything the org indexes, and sat in the agent section
+   while doing so — an org with no agent folders could not set it at all.
+
+Also in this release: `zstandard`, for Codex's archived conversations, and the
+image self-test now reads a compressed conversation at build time.
 
 ## v0.2.3 — 2026-11-14
 
@@ -39,12 +135,14 @@ which **change what gets indexed**.
   for nothing; ingstr refuses if one is started anyway.
 
 **Why it moved into ingstr.** On otter the two units carried `Conflicts=`,
-which *stops* the other unit rather than refusing the new one — so the
-one nightly full run due since the restore was stopped a second after it
-started — and it would have been every night. No orphan has been removed
-since, and nothing inside ingstr could see it because ingstr was never
-started. What the lock protects is ingstr's own state, so
-the guarantee belongs with the program.
+which *stops* the other unit rather than refusing the new one — so whichever
+started second killed the one already running. On 2026-11-14 that was the
+nightly full run, stopped a second after it started, with nothing inside
+ingstr able to see it because ingstr was never started. On the nights after it
+the two did not collide and the full run finished; a fault that shows on some
+nights and not others is the worst kind to leave to a deployment. What the
+lock protects is ingstr's own state, so the guarantee belongs with the
+program.
 
 **New exit code 5** — "a full run could not get the org's run lock". Not 75
 or 76: the estate's own lock wrapper uses those for the same two situations

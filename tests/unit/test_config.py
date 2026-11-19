@@ -128,54 +128,73 @@ def test_agent_source_root_has_no_default(tmp_yaml):
     absent, but it may not be present-and-vague.
     """
     with pytest.raises(ConfigError):
-        load_config(tmp_yaml("c.yml", _with_agent_source("      purge_threshold: 0.5\n")))
+        load_config(tmp_yaml("c.yml", _with_agent_source("      follow: true\n")))
 
 
-def test_agent_source_defaults_to_the_three_moved_surfaces(tmp_yaml):
+def test_agent_source_is_just_the_mount_root(tmp_yaml):
     cfg = load_config(tmp_yaml("c.yml", _with_agent_source()))
     agent_source = cfg.for_org("arc").agent_source
     assert agent_source is not None
     assert agent_source.root == Path("/mnt/agent-hosts/otter")
-    assert agent_source.surfaces == ["memory", "sessions", "scratch"]
-    assert agent_source.purge_threshold == 0.5
 
 
-def test_configs_surface_is_refused(tmp_yaml):
-    """Refuse loudly rather than silently find nothing.
+# ── ingstr-deploy 0.8: two keys refused, each naming where the value went ───
 
-    `configs/` is agent-private, carries no RBAC group and is not in the export
-    (ADR-0010 §1). A config naming it is asking to ingest secrets material, so
-    it is rejected rather than quietly yielding an empty walk.
+
+def test_surfaces_is_refused_and_says_the_plan_declares_them(tmp_yaml):
+    """Two declarations of one thing disagree silently; the plan owns this one.
+
+    Until 0.8 this list chose which folders to read. `compiled-rbac-plan` 0.12
+    declares every agent folder, its group and whether it is indexed, so a
+    config that still carries the list is refused rather than ignored — an
+    ignored key is a deployment believing something that is not happening.
     """
     yaml_text = _with_agent_source(
-        "      root: /mnt/agent-hosts/otter\n      surfaces: [memory, configs]\n"
+        "      root: /mnt/agent-hosts\n      surfaces: [memory, sessions]\n"
     )
-    with pytest.raises(ConfigError, match="never ingested"):
+    with pytest.raises(ConfigError, match="compiled-rbac-plan 0.12"):
         load_config(tmp_yaml("c.yml", yaml_text))
+
+
+def test_purge_threshold_in_agent_source_names_where_it_moved(tmp_yaml):
+    """It governs the whole org, and it sat in the agent section while doing so.
+
+    An org with no agent folders could not set it at all, and an org that added
+    them would silently change the bar for its ordinary data.
+    """
+    yaml_text = _with_agent_source(
+        "      root: /mnt/agent-hosts\n      purge_threshold: 0.2\n"
+    )
+    with pytest.raises(ConfigError, match="beside `source:`"):
+        load_config(tmp_yaml("c.yml", yaml_text))
+
+
+def test_org_purge_threshold_defaults_and_is_read(tmp_yaml):
+    cfg = load_config(tmp_yaml("c.yml", _MINIMAL_YAML))
+    assert cfg.for_org("arc").purge_threshold == 0.5
+
+
+def test_org_purge_threshold_is_declared_on_the_org(tmp_yaml):
+    yaml_text = _MINIMAL_YAML.replace(
+        "    state:\n      db_path: /var/lib/ingstr/arc/state.db\n",
+        "    state:\n      db_path: /var/lib/ingstr/arc/state.db\n"
+        "    purge_threshold: 0.25\n",
+        1,
+    )
+    cfg = load_config(tmp_yaml("c.yml", yaml_text))
+    assert cfg.for_org("arc").purge_threshold == 0.25
 
 
 @pytest.mark.parametrize("bad", ["0.0", "1.5", "-0.2"])
-def test_purge_threshold_bounds(tmp_yaml, bad):
-    yaml_text = _with_agent_source(f"      root: /mnt/x\n      purge_threshold: {bad}\n")
+def test_org_purge_threshold_bounds(tmp_yaml, bad):
+    yaml_text = _MINIMAL_YAML.replace(
+        "    state:\n      db_path: /var/lib/ingstr/arc/state.db\n",
+        "    state:\n      db_path: /var/lib/ingstr/arc/state.db\n"
+        f"    purge_threshold: {bad}\n",
+        1,
+    )
     with pytest.raises(ConfigError):
         load_config(tmp_yaml("c.yml", yaml_text))
-
-
-def test_explicit_surfaces_are_accepted(tmp_yaml):
-    """Covers the validator's accept path, which the default never exercises.
-
-    Pydantic does not run field validators on defaults, so the happy path here
-    is only reached when a config states its surfaces explicitly — which is also
-    the case an operator narrowing ingestion to one surface would hit.
-    """
-    yaml_text = _with_agent_source(
-        "      root: /mnt/agent-hosts/otter\n"
-        "      surfaces: [memory, scratch]\n"
-    )
-    cfg = load_config(tmp_yaml("c.yml", yaml_text))
-    agent_source = cfg.for_org("arc").agent_source
-    assert agent_source is not None
-    assert agent_source.surfaces == ["memory", "scratch"]
 
 
 # ── v0.2.0: one configuration, every org ────────────────────────────────────

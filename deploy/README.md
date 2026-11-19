@@ -123,11 +123,11 @@ The shared registry is host-mounted on otter once at `/mnt/registry/` and bind-m
 > this by hand, read the response body — the status code alone is what made an
 > earlier version of this page claim the package was unreachable.
 >
-> The old `ghcr.io/jobcpf/ingstr-app` holds only pre-release tags — `…-rc4` and
-> earlier, no `v0.1.0`. It answers on any header because those are docker v2
-> manifests, which is why it makes a misleading control. Namespace ruling
-> `agenteco-needs-ghcr-namespace`: published images go to
-> `ghcr.io/onemorerabbit/`, never a personal namespace.
+> Namespace ruling `agenteco-needs-ghcr-namespace`: a release has one home,
+> `ghcr.io/onemorerabbit/ingstr-app`, never a personal namespace. An old
+> personal-namespace package still answers on any header, because its tags are
+> docker v2 manifests — which makes it a misleading control for the check
+> above. It is in no play and no setting; do not use it for anything.
 >
 > **`latest` exists in the org package and must not be used.** It is the same
 > digest as `v0.1.0` today and carries no promise of staying so. The tag decides
@@ -192,8 +192,10 @@ it never gets in. Alert on 5 — it means the nightly run did not happen.
 
 **Do not use `Conflicts=` between the units.** It *stops* the other unit
 rather than refusing the new one, so whichever starts second kills the one
-already running. On otter that stopped the one nightly full run due since the restore, a
-second after it started — and it would have stopped every one after it.
+already running. On otter, on 2026-11-14, that was the nightly full run,
+stopped a second after it started. On the nights after it the two did not
+collide and the full run finished — which is why this is worth a lock rather
+than a watch: nothing says which kind of night it was.
 
 **What otter actually runs today is two timers per org**, not the `.path` unit:
 `ingstr-ingest-<org>.timer` every five minutes and `ingstr-ingest-full-<org>.timer`

@@ -403,3 +403,54 @@ def test_stats_and_health_take_no_lock(tmp_path: Path) -> None:
         health = runner.invoke(app, ["health", "--config", str(cfg)])
     assert stats.exit_code == 0
     assert health.exit_code != 5
+
+
+# ── ingstr-deploy 0.8: agent folders need a plan that declares them ────────
+
+
+def _cfg_with_agent_source(tmp_path: Path) -> Path:
+    cfg_path = _cfg_file(tmp_path)
+    mount = tmp_path / "agent-hosts"
+    mount.mkdir()
+    cfg_path.write_text(
+        cfg_path.read_text().replace(
+            "    state:\n", f"    agent_source:\n      root: {mount}\n    state:\n", 1
+        )
+    )
+    return cfg_path
+
+
+def test_agent_folders_without_a_0_12_plan_stops_the_run(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The alternative to stopping is reading an agent's conversations under a
+    group nobody declared — the one mistake this design exists to prevent."""
+    cfg = _cfg_with_agent_source(tmp_path)
+    monkeypatch.setenv("QDRANT_RW_API_KEY", "x")
+    result = runner.invoke(app, ["ingest", "--config", str(cfg)])
+    assert result.exit_code == 1
+    assert "compiled-rbac-plan 0.12" in result.stderr
+
+
+def test_surfaces_in_the_config_stops_the_run_and_names_the_plan(tmp_path: Path) -> None:
+    cfg = _cfg_with_agent_source(tmp_path)
+    cfg.write_text(
+        cfg.read_text().replace(
+            "    agent_source:\n", "    agent_source:\n      surfaces: [memory]\n", 1
+        )
+    )
+    result = runner.invoke(app, ["stats", "--config", str(cfg)])
+    assert result.exit_code == 1
+    assert "compiled-rbac-plan 0.12" in result.stderr
+
+
+def test_purge_threshold_in_agent_source_names_where_it_moved(tmp_path: Path) -> None:
+    cfg = _cfg_with_agent_source(tmp_path)
+    cfg.write_text(
+        cfg.read_text().replace(
+            "    agent_source:\n", "    agent_source:\n      purge_threshold: 0.2\n", 1
+        )
+    )
+    result = runner.invoke(app, ["stats", "--config", str(cfg)])
+    assert result.exit_code == 1
+    assert "beside `source:`" in result.stderr

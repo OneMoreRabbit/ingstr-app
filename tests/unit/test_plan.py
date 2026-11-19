@@ -220,3 +220,82 @@ def test_groups_row_missing_org_is_refused(tmp_yaml):
     bad = _PLAN_WITH_GROUPS.replace(", org: job", "")
     with pytest.raises(PlanError, match="'name' and 'org'"):
         load_plan(tmp_yaml("plan.yml", bad), tmp_yaml("map.yml", _MAP_TWO))
+
+
+# ── compiled-rbac-plan 0.12: agent_folders[] ───────────────────────────────
+
+_PLAN_WITH_AGENT_FOLDERS = _VALID_PLAN + """\
+agent_folders:
+- {name: test-claude, kind: seat, host: marten, org: arc, folder: sessions,
+   path: 'marten/arc/test-claude/sessions/', group: arc_g0_engineering_global,
+   indexed: true}
+- {name: test-claude, kind: seat, host: marten, org: arc, folder: configs,
+   path: 'marten/arc/test-claude/configs/', group: arc_g0_engineering_global,
+   indexed: false}
+"""
+
+
+def test_agent_folders_are_read_and_narrowed_to_the_indexed_ones(tmp_yaml):
+    plan = load_plan(
+        tmp_yaml("plan.yml", _PLAN_WITH_AGENT_FOLDERS),
+        tmp_yaml("map.yml", _VALID_MAP),
+    )
+    assert plan.declares_agent_folders is True
+    assert len(plan.agent_folders) == 2
+    indexed = plan.indexed_folders_for_org("arc")
+    assert [f.folder for f in indexed] == ["sessions"]
+    assert indexed[0].group == "arc_g0_engineering_global"
+
+
+def test_a_plan_without_the_section_says_so_rather_than_failing(tmp_yaml):
+    """Whether its absence is an error depends on whether the ORG reads agent
+    folders, which the plan cannot know. So the loader reports the difference
+    and the caller decides."""
+    plan = load_plan(
+        tmp_yaml("plan.yml", _VALID_PLAN), tmp_yaml("map.yml", _VALID_MAP)
+    )
+    assert plan.declares_agent_folders is False
+    assert plan.agent_folders == ()
+
+
+def test_configs_marked_indexed_is_refused(tmp_yaml):
+    """`configs` holds settings and is a cleaned copy; indexing it would put an
+    agent's configuration into search (design D7)."""
+    bad = _PLAN_WITH_AGENT_FOLDERS.replace(
+        "configs/', group: arc_g0_engineering_global,\n   indexed: false",
+        "configs/', group: arc_g0_engineering_global,\n   indexed: true",
+    )
+    with pytest.raises(PlanError, match="configs is never indexed"):
+        load_plan(tmp_yaml("plan.yml", bad), tmp_yaml("map.yml", _VALID_MAP))
+
+
+def test_a_folder_outside_the_four_is_refused(tmp_yaml):
+    bad = _PLAN_WITH_AGENT_FOLDERS.replace("folder: sessions", "folder: credentials")
+    with pytest.raises(PlanError, match="not one of"):
+        load_plan(tmp_yaml("plan.yml", bad), tmp_yaml("map.yml", _VALID_MAP))
+
+
+def test_a_group_outside_required_groups_is_refused(tmp_yaml):
+    bad = _PLAN_WITH_AGENT_FOLDERS.replace(
+        "group: arc_g0_engineering_global,\n   indexed: true",
+        "group: arc_g99_invented_global,\n   indexed: true",
+    )
+    with pytest.raises(PlanError, match="not in required_groups"):
+        load_plan(tmp_yaml("plan.yml", bad), tmp_yaml("map.yml", _VALID_MAP))
+
+
+def test_a_path_in_the_wrong_form_is_refused(tmp_yaml):
+    """It is matched as text against the mount root, so a leading slash or a
+    missing trailing one reads nothing — silently."""
+    bad = _PLAN_WITH_AGENT_FOLDERS.replace(
+        "path: 'marten/arc/test-claude/sessions/'", "path: '/marten/arc/test-claude/sessions'"
+    )
+    with pytest.raises(PlanError, match="as the plan writes paths"):
+        load_plan(tmp_yaml("plan.yml", bad), tmp_yaml("map.yml", _VALID_MAP))
+
+
+def test_indexed_must_be_a_boolean_not_inferred_from_the_name(tmp_yaml):
+    """A deployment should be able to READ that a folder is not indexed."""
+    bad = _PLAN_WITH_AGENT_FOLDERS.replace("indexed: true", "indexed: 'yes'")
+    with pytest.raises(PlanError, match="boolean 'indexed'"):
+        load_plan(tmp_yaml("plan.yml", bad), tmp_yaml("map.yml", _VALID_MAP))
