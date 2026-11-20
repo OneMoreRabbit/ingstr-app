@@ -141,3 +141,63 @@ def test_a_parser_error_on_a_csv_is_read_as_text(tmp_path):
     with patch("ingstr.parse.partition", side_effect=fake):
         assert parse_file(f) == ["text element"]
     assert calls[1]["content_type"] == "text/plain"
+
+
+# ── the fallback was built in v0.2.3 and never declared on ARC ─────────────
+
+
+def test_a_non_utf8_file_with_nothing_declared_is_its_own_failure(tmp_path):
+    """20 of ARC's CSV files failed on `0xba` through the whole first full
+    index on v0.2.5 — the fallback existed and the declaration did not.
+
+    A separate type so the run can count them apart: the remedy is one line of
+    configuration, and inside the error total they read exactly like files
+    nobody can parse.
+    """
+    from ingstr.exceptions import UndeclaredEncoding
+
+    f = tmp_path / "measure.csv"
+    f.write_bytes("site,area\nNorth 1\xba,12\n".encode("cp1252"))
+
+    with pytest.raises(UndeclaredEncoding, match="none declared"):
+        parse_file(f)
+
+
+def test_the_declared_encoding_reads_the_same_file(tmp_path):
+    """Declared, never detected — and it works, which is the point of
+    counting the files that have no declaration."""
+    f = tmp_path / "measure.csv"
+    f.write_bytes("site,area\nNorth 1\xba,12\n".encode("cp1252"))
+
+    elements = parse_file(f, fallback_encodings=["cp1252"])
+
+    assert "North 1\xba" in " ".join(str(e) for e in elements)
+
+
+def test_tried_and_failed_is_not_the_undeclared_failure(tmp_path):
+    """A declaration that does not help is a different problem from no
+    declaration, and only one of them has a one-line remedy."""
+    from ingstr.exceptions import UndeclaredEncoding
+
+    f = tmp_path / "measure.csv"
+    f.write_bytes(b"site,area\nNorth 1\xff\xfe\x00,12\n")
+
+    with pytest.raises(IngstrError) as exc_info:
+        parse_file(f, fallback_encodings=["ascii"])
+    assert not isinstance(exc_info.value, UndeclaredEncoding)
+
+
+def test_an_rtf_file_is_parsed(tmp_path):
+    """One RTF file in ARC failed on a missing dependency in the first full
+    index. The `rtf` extra is a 34 MB wheel carrying pandoc — 1% of an image
+    that is already 3.75 GB — so the answer is to install it, not to declare
+    RTF unsupported. This test is what says the extra is still installed."""
+    f = tmp_path / "note.rtf"
+    f.write_text(
+        r"{\rtf1\ansi\deff0 {\fonttbl {\f0 Times;}}\f0\fs24 "
+        r"A short note about the mount.\par}"
+    )
+
+    elements = parse_file(f)
+
+    assert "note about the mount" in " ".join(str(e) for e in elements)

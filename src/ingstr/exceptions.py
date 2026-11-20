@@ -61,8 +61,28 @@ class RecordedFileError(IngstrError):
     on, and must not write anything itself.
     """
 
-    def __init__(self, message: str) -> None:
+    def __init__(self, message: str, *, undeclared_encoding: bool = False) -> None:
         super().__init__(message)
+        #: True when the recorded failure was "not UTF-8, and nothing
+        #: declared to try". Carried because the raising step knows the type
+        #: and the counting caller would otherwise have only the text.
+        self.undeclared_encoding = undeclared_encoding
+
+
+class UndeclaredEncoding(IngstrError):
+    """A file is not UTF-8 and this org has declared no encoding to try.
+
+    A separate type so the run can COUNT it, because the remedy is one line of
+    configuration and the count is the only thing that would ever lead anyone
+    to it. Measured on ARC: 20 CSV files failed on `0xba` in the first full
+    index on v0.2.5, which is the fault v0.2.3 built the fallback for — the
+    fallback was there, the declaration was not, and nothing in the run's
+    report distinguished those 20 from a parse failure nobody can fix
+    (constitution §9: a signal has to carry information).
+
+    Still not detected. A guessed encoding produces confident mojibake, which
+    is embedded and searchable and wrong.
+    """
 
 
 class AmbiguousGrant(IngstrError):

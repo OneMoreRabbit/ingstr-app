@@ -30,6 +30,7 @@ from .exceptions import (
     IngstrError,
     RecordedFileError,
     UnclassifiableFile,
+    UndeclaredEncoding,
     UpstreamUnavailable,
     WrongOrgFile,
 )
@@ -78,6 +79,13 @@ class RunSummary:
     #: skipped them. This number says how much of the error count was carried
     #: rather than discovered.
     files_failed_skipped: int = 0
+    #: Files that are not UTF-8 while this org declares no encoding to try.
+    #: Counted in files_errored too; counted apart because the remedy is one
+    #: line of configuration, and a total that hides it reads exactly like a
+    #: tree full of files nobody can parse. 20 of ARC's CSV files were in
+    #: this state through the first full index on v0.2.5 — the fallback was
+    #: built in v0.2.3 and never declared.
+    files_undeclared_encoding: int = 0
     #: Files refused because the folder granting them carries more than one
     #: group. Counted apart because it is the grants that need fixing, not
     #: the files.
@@ -214,6 +222,8 @@ def run_ingest(
             # twice.
             _log.error("file_failed", source_path=abs_path, error=str(e))
             summary.files_errored += 1
+            if e.undeclared_encoding:
+                summary.files_undeclared_encoding += 1
             continue
         except IngstrError as e:
             _log.error("file_failed", source_path=abs_path, error=str(e))
@@ -624,7 +634,9 @@ def _process_file(
                 stat_info=stat_info,
                 existing=existing,
             )
-        raise RecordedFileError(str(e)) from e
+        raise RecordedFileError(
+            str(e), undeclared_encoding=isinstance(e, UndeclaredEncoding)
+        ) from e
 
     # 4. embed (UpstreamUnavailable propagates)
     texts = [c.text for c in chunks]

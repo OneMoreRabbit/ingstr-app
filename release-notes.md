@@ -12,6 +12,46 @@ Newest first. One entry per release tag, written in the same commit that cuts th
 tag. Plain English: a reader skimming this page should know what changed and
 whether they have to act.
 
+## v0.2.6 — 2026-11-20
+
+**TL;DR:** the two faults in ARC's first full index on v0.2.5 that were mine.
+One was a dependency; the other was not a code fault at all, and this release
+makes it say so.
+
+### RTF files are parsed
+
+One RTF file failed with "partition_rtf() is not available because one or more
+dependencies are not installed". The `rtf` extra is `pypandoc-binary`, a 34 MB
+wheel carrying pandoc — about **1% of an image that is already 3.75 GB**, and
+no system package. Measured before adding it, because "one file" is a reason
+to check the cost rather than to assume it. A test now says the extra is
+installed, so it cannot quietly fall out of a build.
+
+### "Not UTF-8, and nothing declared" is counted as itself
+
+20 CSV files failed with `'utf-8' codec can't decode byte 0xba` through the
+whole first full index — **the fallback shipped in v0.2.3 and ARC declares no
+`source.fallback_encodings`**, so there was nothing to try. The code was
+right. What was wrong is that those 20 sat inside the error total looking
+exactly like files nobody can parse, when the remedy is one line of
+configuration.
+
+So a file that is not UTF-8 with nothing declared is now its own failure kind,
+counted apart, and the run ends with:
+
+```
+NOT UTF-8, NOTHING DECLARED: 20 file(s) could not be read as UTF-8 and this
+org declares no source.fallback_encodings. Add the encoding its files are
+written in (for example cp1252) and they will be indexed on the next run.
+```
+
+**Still declared, never detected.** A guessed encoding produces confident
+mojibake, which is embedded and searchable and wrong.
+
+**Not in this release, and not ingstr's to decide:** scanned PDFs needing OCR
+(166 files) and the files needing LibreOffice (20) are image-size decisions
+for the operator.
+
 ## v0.2.5 — 2026-11-19
 
 **TL;DR:** v0.2.4 is tagged and **has no image**: its build failed on the

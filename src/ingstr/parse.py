@@ -3,7 +3,7 @@ from typing import Any
 
 from unstructured.partition.auto import partition
 
-from .exceptions import IngstrError
+from .exceptions import IngstrError, UndeclaredEncoding
 
 #: The file types whose rows can disagree about how many fields they have, and
 #: so the only ones a table-parse failure may send to the plain-text fallback.
@@ -67,11 +67,17 @@ def _retry_with_encodings(
             return list(partition(filename=str(path), encoding=encoding))
         except Exception:  # noqa: BLE001, PERF203 — try the next declared one
             continue
-    raise IngstrError(
+    message = (
         f"failed to parse {path}: {original}. Tried the declared fallback "
         f"encodings {encodings or '(none declared)'}; declare one in "
         "source.fallback_encodings if this file's encoding is known."
-    ) from original
+    )
+    # Nothing declared is a different failure from "we tried and none worked":
+    # the first is one line of configuration away and the second is not, so
+    # the run counts them apart.
+    if not encodings:
+        raise UndeclaredEncoding(message) from original
+    raise IngstrError(message) from original
 
 
 def _is_a_delimited_file_whose_rows_disagree(path: Path, error: Exception) -> bool:
