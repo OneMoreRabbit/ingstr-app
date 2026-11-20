@@ -131,6 +131,7 @@ pycparser==3.12
 pydantic==2.14.3
 pydantic_core==2.50.4
 Pygments==2.21.0
+pypandoc-binary==1.17
 pyparsing==3.3.3
 pypdf==6.21.4
 pypdfium2==5.15.2

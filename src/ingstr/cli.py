@@ -221,6 +221,20 @@ def ingest(
             else:
                 exit_code = _EXIT_PARTIAL if summary.files_errored > 0 else _EXIT_OK
 
+            if summary.files_undeclared_encoding:
+                # The one per-file failure with a one-line remedy. Said here
+                # because it is the only place anyone would ever learn it:
+                # otherwise these sit inside the error total looking exactly
+                # like files nobody can do anything about.
+                typer.echo(
+                    f"NOT UTF-8, NOTHING DECLARED: {summary.files_undeclared_encoding} "
+                    "file(s) could not be read as UTF-8 and this org declares no "
+                    "source.fallback_encodings. Add the encoding its files are "
+                    "written in (for example cp1252) and they will be indexed on "
+                    "the next run.",
+                    err=True,
+                )
+
             folders = summary.agent_folders
             if folders is not None:
                 typer.echo(
